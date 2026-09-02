@@ -54,7 +54,7 @@ VEHICLES = {
                 "service_number": 1,
                 "date": "2025-02-15",
                 "km": 1023,
-                "workshop": "Kataria Automobiles, Ahmedabad",
+                "workshop": "Autoverse Motors, Ahmedabad",
                 "type": "First Free Service",
                 "cost": 0
             },
@@ -92,7 +92,7 @@ def handle_schedule_pickup(**kwargs):
         "driver_name": "Rajesh Kumar",
         "driver_phone": "+919876500001",
         "pickup_address": kwargs.get("pickup_address", "B-101, Sterling City, Bopal, Ahmedabad"),
-        "workshop": "Kataria Automobiles, S.G. Highway, Ahmedabad",
+        "workshop": "Autoverse Motors, S.G. Highway, Ahmedabad",
         "special_instructions": kwargs.get("special_instructions", ""),
         "note": "Driver details will be sent via SMS on the morning of pickup."
     }

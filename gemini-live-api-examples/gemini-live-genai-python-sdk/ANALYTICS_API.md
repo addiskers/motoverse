@@ -97,7 +97,7 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
   "caller": "web-a1b2c3",
   "booking_created": true,
   "transcript": [
-    { "role": "gemini", "text": "Namaste! Main Rahul bol raha hoon...", "ts": "..." },
+    { "role": "agent", "text": "Namaste! Main Rahul bol raha hoon...", "ts": "..." },
     { "role": "user", "text": "Haan boliye", "ts": "..." }
   ],
   "tool_calls": [
@@ -137,5 +137,7 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 | `source` | `browser` (web demo) or `twilio` (phone) |
 | `booking_created` | `true` if a service pickup was booked on the call |
 | `booking_conversion_rate` | bookings ÷ total calls (0–1) |
+| `transcript[].role` | `user` (the customer) or `agent` (the AI assistant) |
+| `tool_calls[]` | Actions the assistant took during the call (e.g. `schedule_pickup`) |
 
 > Note: This API intentionally does not expose any cost, pricing, or token-usage data.

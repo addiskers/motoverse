@@ -83,14 +83,35 @@ function setStatus(className, text) {
 }
 
 // --- Call Timer ---
+// Demo call is capped to prevent abuse. At WRAPUP_MS the agent is told to wind
+// up; at MAX_CALL_MS the call is force-ended.
+const MAX_CALL_MS = 7 * 60 * 1000;       // hard stop at 7:00
+const WRAPUP_MS = MAX_CALL_MS - 25 * 1000; // ~6:35: tell agent to wind up
+let wrapUpTriggered = false;
+
 function startCallTimer() {
   callStartTime = Date.now();
+  wrapUpTriggered = false;
   callTimerEl.textContent = "00:00";
   callTimerInterval = setInterval(() => {
     const elapsed = Date.now() - callStartTime;
     const mins = Math.floor(elapsed / 60000).toString().padStart(2, "0");
     const secs = Math.floor((elapsed % 60000) / 1000).toString().padStart(2, "0");
     callTimerEl.textContent = `${mins}:${secs}`;
+
+    // Near the limit: ask the agent to wind up gracefully.
+    if (!wrapUpTriggered && elapsed >= WRAPUP_MS) {
+      wrapUpTriggered = true;
+      if (geminiClient.isConnected()) {
+        geminiClient.sendText("[SYSTEM] wrap up the call now");
+      }
+    }
+
+    // Hard limit reached: end the call no matter what.
+    if (elapsed >= MAX_CALL_MS) {
+      stopCallTimer();
+      try { geminiClient.disconnect(); } catch (e) {}
+    }
   }, 1000);
 }
 
@@ -368,68 +389,111 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// --- Call Me (Twilio outbound) ---
-const phoneInput = document.getElementById("phoneInput");
-const callMeBtn = document.getElementById("callMeBtn");
-const callMeStatus = document.getElementById("callMeStatus");
+// --- Email OTP gate ---
+let otpToken = null;
+let otpEmailValue = "";
 
-if (callMeBtn) {
-  callMeBtn.onclick = async () => {
-    let phone = phoneInput.value.trim();
-    if (!phone) {
-      callMeStatus.textContent = "Enter your phone number";
-      callMeStatus.className = "call-me-status error";
-      return;
-    }
-    // Auto-add +91 if user just typed digits
-    phone = phone.replace(/[\s\-()]/g, "");
-    if (!phone.startsWith("+")) {
-      phone = "+91" + phone;
-    }
+const otpEmail = document.getElementById("otpEmail");
+const otpSendBtn = document.getElementById("otpSendBtn");
+const otpCode = document.getElementById("otpCode");
+const otpVerifyBtn = document.getElementById("otpVerifyBtn");
+const otpResendBtn = document.getElementById("otpResendBtn");
+const otpStatus = document.getElementById("otpStatus");
+const otpStepEmail = document.getElementById("otp-step-email");
+const otpStepCode = document.getElementById("otp-step-code");
+const otpGate = document.getElementById("otp-gate");
+const callStartWrap = document.getElementById("call-start-wrap");
 
-    callMeBtn.disabled = true;
-    callMeStatus.textContent = "Calling...";
-    callMeStatus.className = "call-me-status loading";
+function setOtpStatus(text, type) {
+  otpStatus.textContent = text || "";
+  otpStatus.className = "otp-status" + (type ? " " + type : "");
+}
 
-    try {
-      const res = await fetch("/call-me", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        callMeStatus.textContent = "Calling " + phone + " — pick up your phone! Opening live transcript...";
-        callMeStatus.className = "call-me-status success";
-        // Open live transcript dashboard in new tab
-        setTimeout(() => window.open("/live", "_blank"), 1000);
-      } else {
-        callMeStatus.textContent = data.error || "Failed to call";
-        callMeStatus.className = "call-me-status error";
-      }
-    } catch (e) {
-      callMeStatus.textContent = "Network error: " + e.message;
-      callMeStatus.className = "call-me-status error";
-    }
-    callMeBtn.disabled = false;
-  };
-
-  // Enter key triggers call
-  if (phoneInput) {
-    phoneInput.onkeypress = (e) => {
-      if (e.key === "Enter") callMeBtn.click();
-    };
+async function sendOtp() {
+  const email = (otpEmail.value || "").trim();
+  if (!email || !email.includes("@")) {
+    setOtpStatus("Please enter a valid email.", "error");
+    return;
   }
+  otpSendBtn.disabled = true;
+  setOtpStatus("Sending code...", "loading");
+  try {
+    const res = await fetch("/otp/request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      otpEmailValue = email;
+      otpStepEmail.classList.add("hidden");
+      otpStepCode.classList.remove("hidden");
+      setOtpStatus(data.message || "Code sent. Check your email.", "success");
+      otpCode.focus();
+    } else {
+      setOtpStatus(data.message || "Could not send code.", "error");
+    }
+  } catch (e) {
+    setOtpStatus("Network error. Please try again.", "error");
+  }
+  otpSendBtn.disabled = false;
+}
+
+async function verifyOtp() {
+  const code = (otpCode.value || "").trim();
+  if (!/^\d{6}$/.test(code)) {
+    setOtpStatus("Enter the 6-digit code.", "error");
+    return;
+  }
+  otpVerifyBtn.disabled = true;
+  setOtpStatus("Verifying...", "loading");
+  try {
+    const res = await fetch("/otp/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: otpEmailValue, code }),
+    });
+    const data = await res.json();
+    if (data.success && data.token) {
+      otpToken = data.token;
+      otpGate.classList.add("hidden");
+      callStartWrap.classList.remove("hidden");
+      setOtpStatus("", "");
+    } else {
+      setOtpStatus(data.message || "Incorrect code.", "error");
+    }
+  } catch (e) {
+    setOtpStatus("Network error. Please try again.", "error");
+  }
+  otpVerifyBtn.disabled = false;
+}
+
+if (otpSendBtn) {
+  otpSendBtn.onclick = sendOtp;
+  otpVerifyBtn.onclick = verifyOtp;
+  otpResendBtn.onclick = () => {
+    otpStepCode.classList.add("hidden");
+    otpStepEmail.classList.remove("hidden");
+    otpCode.value = "";
+    setOtpStatus("", "");
+    otpEmail.focus();
+  };
+  otpEmail.onkeypress = (e) => { if (e.key === "Enter") sendOtp(); };
+  otpCode.onkeypress = (e) => { if (e.key === "Enter") verifyOtp(); };
 }
 
 // --- Connect ---
 connectBtn.onclick = async () => {
+  if (!otpToken) {
+    setStatus("error", "Please verify your email first");
+    return;
+  }
   setStatus("disconnected", "Connecting...");
   connectBtn.disabled = true;
 
   try {
     await mediaHandler.initializeAudio();
-    geminiClient.connect();
+    geminiClient.connect(otpToken);
   } catch (error) {
     console.error("Connection error:", error);
     setStatus("error", "Failed: " + error.message);

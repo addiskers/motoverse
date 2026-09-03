@@ -418,6 +418,69 @@ body::before {
 .call-me-status.error { color: var(--accent-danger); }
 .call-me-status.loading { color: var(--accent-cyan); }
 
+/* ===== EMAIL OTP GATE ===== */
+.otp-gate {
+  margin-top: 8px;
+}
+.otp-gate-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary, var(--text-muted));
+  margin-bottom: 12px;
+  text-align: center;
+}
+.otp-input-row {
+  display: flex;
+  gap: 8px;
+}
+.otp-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+.otp-input::placeholder { color: var(--text-muted); }
+.otp-input:focus { border-color: rgba(0, 212, 255, 0.4); }
+.otp-btn {
+  padding: 10px 18px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(135deg, var(--accent-cyan), #0099cc);
+  color: var(--bg-primary);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+}
+.otp-btn:hover { transform: scale(1.03); box-shadow: 0 0 16px rgba(0, 212, 255, 0.3); }
+.otp-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.otp-resend {
+  margin-top: 10px;
+  background: none;
+  border: none;
+  color: var(--accent-cyan);
+  font-size: 0.75rem;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.otp-status {
+  font-size: 0.75rem;
+  margin-top: 8px;
+  min-height: 1.2em;
+  text-align: center;
+}
+.otp-status.success { color: var(--accent-success); }
+.otp-status.error { color: var(--accent-danger); }
+.otp-status.loading { color: var(--accent-cyan); }
+.call-btn-note { opacity: 0.7; }
+
 /* ===== ACTIVE CALL DASHBOARD ===== */
 .app-section {
   flex: 1;

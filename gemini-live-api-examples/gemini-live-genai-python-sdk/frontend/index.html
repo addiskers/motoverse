@@ -89,28 +89,39 @@
                     </div>
                 </div>
 
-                <button id="connectBtn" class="call-btn-start" aria-label="Start Call">
-                    <span class="call-btn-ring"></span>
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 4 3 4.24 3 5c0 9.39 7.61 17 17 17 .71 0 1-.6 1-1.18v-3.45c0-.54-.45-.99-.99-.99z"/>
-                    </svg>
-                </button>
-                <p class="call-btn-label">Start browser call</p>
+                <!-- ===== OTP VERIFICATION GATE ===== -->
+                <div id="otp-gate" class="otp-gate">
+                    <p class="otp-gate-label">Verify your email to start the demo</p>
 
-                <div class="divider-or"><span>OR</span></div>
-
-                <div class="phone-call-section">
-                    <p class="phone-call-label">Get a call on your phone</p>
-                    <div class="phone-input-row">
-                        <input id="phoneInput" type="tel" placeholder="+91 98765 43210" class="phone-input" />
-                        <button id="callMeBtn" class="call-me-btn" aria-label="Call Me">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                                <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 4 3 4.24 3 5c0 9.39 7.61 17 17 17 .71 0 1-.6 1-1.18v-3.45c0-.54-.45-.99-.99-.99z"/>
-                            </svg>
-                            Call Me
-                        </button>
+                    <!-- Step 1: email -->
+                    <div id="otp-step-email" class="otp-step">
+                        <div class="otp-input-row">
+                            <input id="otpEmail" type="email" inputmode="email" placeholder="you@example.com" class="otp-input" autocomplete="email" />
+                            <button id="otpSendBtn" class="otp-btn">Send code</button>
+                        </div>
                     </div>
-                    <p id="callMeStatus" class="call-me-status"></p>
+
+                    <!-- Step 2: code -->
+                    <div id="otp-step-code" class="otp-step hidden">
+                        <div class="otp-input-row">
+                            <input id="otpCode" type="text" inputmode="numeric" maxlength="6" placeholder="6-digit code" class="otp-input" autocomplete="one-time-code" />
+                            <button id="otpVerifyBtn" class="otp-btn">Verify</button>
+                        </div>
+                        <button id="otpResendBtn" class="otp-resend">Change email / resend</button>
+                    </div>
+
+                    <p id="otpStatus" class="otp-status"></p>
+                </div>
+
+                <!-- Revealed only after verification -->
+                <div id="call-start-wrap" class="hidden">
+                    <button id="connectBtn" class="call-btn-start" aria-label="Start Call">
+                        <span class="call-btn-ring"></span>
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 4 3 4.24 3 5c0 9.39 7.61 17 17 17 .71 0 1-.6 1-1.18v-3.45c0-.54-.45-.99-.99-.99z"/>
+                        </svg>
+                    </button>
+                    <p class="call-btn-label">Start browser call <span class="call-btn-note">(max 7 min demo)</span></p>
                 </div>
             </div>
         </section>

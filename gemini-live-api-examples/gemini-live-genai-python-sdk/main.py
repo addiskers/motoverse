@@ -15,7 +15,6 @@ from fastapi.staticfiles import StaticFiles
 from gemini_live import GeminiLive
 from twilio_handler import TwilioMediaBridge
 
-import otp
 import pricing
 import store
 from recorder import CallRecorder
@@ -141,49 +140,9 @@ async def root():
     return FileResponse("frontend/index.html")
 
 
-# ============ EMAIL OTP GATE (anti-spam for the browser demo) ============
-
-def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
-@app.post("/otp/request")
-async def otp_request(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    email = body.get("email", "")
-    ok, message = otp.request_code(email, _client_ip(request))
-    status = 200 if ok else 429 if "Too many" in message or "wait" in message else 400
-    return JSONResponse({"success": ok, "message": message}, status_code=status)
-
-
-@app.post("/otp/verify")
-async def otp_verify(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    email = body.get("email", "")
-    code = body.get("code", "")
-    ok, result = otp.verify_code(email, code)
-    if ok:
-        return JSONResponse({"success": True, "token": result})
-    return JSONResponse({"success": False, "message": result}, status_code=400)
-
-
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for Gemini Live. Requires a valid OTP token."""
-    token = websocket.query_params.get("token", "")
-    if not otp.verify_token(token):
-        await websocket.close(code=4401)  # unauthorized
-        logger.warning("Rejected /ws connection: missing or invalid OTP token")
-        return
+    """WebSocket endpoint for Gemini Live."""
     await websocket.accept()
 
     logger.info("WebSocket connection accepted")

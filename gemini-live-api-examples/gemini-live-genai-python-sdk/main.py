@@ -35,6 +35,11 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "+19785715824")
 ANALYTICS_SECRET = os.getenv("ANALYTICS_SECRET", "kataria2026")
+# Separate client-facing API key (Bearer token) for /api/v1/analytics/* and the
+# /analytics dashboard. NO default on purpose — if unset, the client API returns
+# 503 so it can never ship open. This key is safe to share with the client's
+# developers; it exposes only cost-free usage data, never our internal /admin.
+ANALYTICS_API_KEY = os.getenv("ANALYTICS_API_KEY", "")
 
 # ============ MOCK BACKEND DATA ============
 
@@ -1139,6 +1144,307 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer();});
 </html>"""
 
 
+# ============ CLIENT ANALYTICS DASHBOARD (usage & bookings, NO cost) ============
+
+CLIENT_ANALYTICS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Autoverse AI · Call Analytics</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0e17; --card:rgba(17,24,39,0.75); --border:rgba(255,255,255,0.08);
+  --cyan:#00d4ff; --purple:#7c3aed; --green:#10b981; --red:#ef4444; --amber:#f59e0b;
+  --text:#f1f5f9; --muted:#64748b; --secondary:#94a3b8;
+  --mono:'SF Mono',ui-monospace,Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
+body::before{content:'';position:fixed;inset:0;background-image:
+  linear-gradient(rgba(0,212,255,0.03) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(0,212,255,0.03) 1px,transparent 1px);
+  background-size:40px 40px;pointer-events:none;z-index:0;}
+.hidden{display:none !important;}
+a{color:var(--cyan);}
+.login-wrap{position:relative;z-index:1;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
+.login-card{background:var(--card);backdrop-filter:blur(14px);border:1px solid var(--border);border-radius:18px;padding:34px 30px;width:100%;max-width:380px;text-align:center;}
+.login-card h1{font-size:1.15rem;margin-bottom:6px;}
+.login-card p{color:var(--muted);font-size:0.8rem;margin-bottom:20px;}
+input,select{font-family:inherit;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:10px 12px;font-size:0.85rem;width:100%;outline:none;}
+input:focus,select:focus{border-color:var(--cyan);}
+.btn{font-family:inherit;cursor:pointer;border:none;border-radius:10px;padding:10px 16px;font-size:0.82rem;font-weight:600;color:#04121a;background:var(--cyan);transition:opacity .15s;}
+.btn:hover{opacity:.88;}
+.btn.ghost{background:transparent;border:1px solid var(--border);color:var(--secondary);}
+.login-card .btn{width:100%;margin-top:14px;}
+.err{color:var(--red);font-size:0.75rem;margin-top:10px;min-height:1em;}
+.top-bar{position:sticky;top:0;z-index:10;display:flex;justify-content:space-between;align-items:center;
+  padding:12px 22px;background:rgba(10,14,23,0.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);}
+.brand{font-weight:800;font-size:0.92rem;color:var(--cyan);letter-spacing:.2px;}
+.top-actions{display:flex;align-items:center;gap:10px;}
+.status{display:flex;align-items:center;gap:6px;font-size:0.72rem;color:var(--secondary);}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2.4s infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.5;}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+.container{position:relative;z-index:1;max-width:1200px;margin:0 auto;padding:22px;}
+.section-title{font-size:0.7rem;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);margin:26px 4px 12px;}
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;animation:fadeIn .25s;}
+.stat .label{font-size:0.66rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);}
+.stat .value{font-size:1.5rem;font-weight:800;margin-top:8px;font-family:var(--mono);}
+.stat .sub{font-size:0.68rem;color:var(--secondary);margin-top:4px;}
+.stat.gr .value{color:var(--green);}
+.stat.cy .value{color:var(--cyan);}
+.stat.hi .value{color:var(--purple);}
+.row2{display:grid;grid-template-columns:1.4fr 1fr;gap:12px;}
+@media(max-width:820px){.row2{grid-template-columns:1fr;}}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px;}
+.panel h3{font-size:0.8rem;font-weight:600;margin-bottom:14px;color:var(--secondary);}
+.bar-row{display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:0.72rem;}
+.bar-row .k{width:78px;color:var(--secondary);text-transform:capitalize;}
+.bar-row .track{flex:1;height:8px;background:rgba(255,255,255,0.05);border-radius:6px;overflow:hidden;}
+.bar-row .fill{height:100%;background:linear-gradient(90deg,var(--cyan),var(--purple));border-radius:6px;}
+.bar-row .v{width:38px;text-align:right;font-family:var(--mono);color:var(--text);}
+.chart{display:flex;align-items:flex-end;gap:4px;height:150px;padding-top:10px;}
+.chart .col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;min-width:0;}
+.chart .cbar{width:70%;background:linear-gradient(180deg,var(--cyan),rgba(0,212,255,0.25));border-radius:4px 4px 0 0;min-height:2px;}
+.chart .clabel{font-size:0.55rem;color:var(--muted);white-space:nowrap;transform:rotate(-45deg);transform-origin:top left;margin-top:6px;}
+.filters{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;}
+.filters input,.filters select{width:auto;}
+.filters .grow{flex:1;min-width:160px;}
+.table-scroll{overflow-x:auto;border:1px solid var(--border);border-radius:14px;}
+table{width:100%;border-collapse:collapse;font-size:0.78rem;}
+th,td{padding:10px 12px;text-align:left;white-space:nowrap;}
+thead th{background:rgba(255,255,255,0.03);color:var(--muted);font-weight:600;font-size:0.68rem;text-transform:uppercase;letter-spacing:.6px;}
+tbody tr{border-top:1px solid var(--border);cursor:pointer;transition:background .12s;}
+tbody tr:hover{background:rgba(0,212,255,0.05);}
+.num{text-align:right;font-family:var(--mono);}
+.pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:0.66rem;font-weight:600;}
+.pill.yes{background:rgba(16,185,129,0.15);color:var(--green);}
+.pill.no{background:rgba(255,255,255,0.06);color:var(--secondary);}
+.drawer{position:fixed;top:0;right:0;height:100vh;width:min(560px,94vw);background:#0d131f;border-left:1px solid var(--border);z-index:50;padding:22px;overflow-y:auto;transform:translateX(100%);transition:transform .2s;}
+.drawer.open{transform:translateX(0);}
+.drawer h2{font-size:1rem;margin-bottom:4px;}
+.drawer .close{position:absolute;top:16px;right:18px;cursor:pointer;color:var(--muted);font-size:1.4rem;background:none;border:none;}
+.msg{margin:8px 0;padding:9px 12px;border-radius:10px;font-size:0.8rem;line-height:1.4;}
+.msg.user{background:rgba(0,212,255,0.08);}
+.msg.gemini{background:rgba(124,58,237,0.10);}
+.msg .who{font-size:0.6rem;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin-bottom:3px;}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:40;opacity:0;pointer-events:none;transition:opacity .2s;}
+.overlay.on{opacity:1;pointer-events:auto;}
+#toasts{position:fixed;bottom:18px;right:18px;z-index:100;display:flex;flex-direction:column;gap:8px;}
+.toast{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:0.78rem;animation:fadeIn .2s;}
+.toast.error{border-color:var(--red);color:var(--red);}
+</style>
+</head>
+<body>
+<div id="login" class="login-wrap">
+  <div class="login-card">
+    <h1>Autoverse AI · Call Analytics</h1>
+    <p>Enter your API key to view call activity and booking performance.</p>
+    <input id="keyInput" type="password" placeholder="API key" autocomplete="current-password"/>
+    <button class="btn" id="loginBtn">Sign in</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+</div>
+
+<div id="dash" class="hidden">
+  <div class="top-bar">
+    <span class="brand">Autoverse AI · Call Analytics</span>
+    <div class="top-actions">
+      <span class="status"><span class="dot"></span><span id="updated">—</span></span>
+      <button class="btn ghost" id="logoutBtn">Log out</button>
+    </div>
+  </div>
+  <div class="container">
+    <div class="section-title">Overview</div>
+    <div class="stats" id="stats"></div>
+
+    <div class="section-title">Activity</div>
+    <div class="row2">
+      <div class="panel"><h3>Calls per day</h3><div class="chart" id="chart"></div></div>
+      <div class="panel"><h3>Breakdown</h3><div id="breakdown"></div></div>
+    </div>
+
+    <div class="section-title">Call log</div>
+    <div class="filters">
+      <input type="date" id="fromDate" title="From date"/>
+      <input type="date" id="toDate" title="To date"/>
+      <select id="sourceFilter"><option value="">All sources</option><option value="twilio">Phone</option><option value="browser">Browser</option></select>
+      <input class="grow" id="search" placeholder="Search caller / language…"/>
+      <button class="btn ghost" id="csvBtn">Export CSV</button>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Caller</th><th>Source</th>
+          <th class="num">Duration</th><th>Lang</th><th>Status</th><th>Booking</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div id="count" class="section-title" style="margin-top:10px;"></div>
+  </div>
+</div>
+
+<div class="overlay" id="overlay" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <button class="close" onclick="closeDrawer()">&times;</button>
+  <div id="drawerBody"></div>
+</div>
+<div id="toasts"></div>
+
+<script>
+const $=(id)=>document.getElementById(id);
+const KEY=()=>localStorage.getItem('analytics_key')||'';
+const state={summary:null,calls:[]};
+
+async function api(path){
+  const res=await fetch(path,{headers:{'Authorization':'Bearer '+KEY()}});
+  if(res.status===401){logout();throw new Error('unauthorized');}
+  if(!res.ok)throw new Error('HTTP '+res.status);
+  return res;
+}
+function showDash(on){$('login').classList.toggle('hidden',on);$('dash').classList.toggle('hidden',!on);}
+async function login(){
+  const k=$('keyInput').value.trim();
+  if(!k){$('loginErr').textContent='Enter a key';return;}
+  localStorage.setItem('analytics_key',k);
+  try{await loadAll();showDash(true);$('loginErr').textContent='';}
+  catch(e){localStorage.removeItem('analytics_key');$('loginErr').textContent='Invalid key';}
+}
+function logout(){localStorage.removeItem('analytics_key');showDash(false);}
+
+const fmtNum=(n)=>(n==null||isNaN(n))?'—':new Intl.NumberFormat('en-US').format(n);
+const fmtPct=(x)=>(x==null||isNaN(x))?'—':(x*100).toFixed(1)+'%';
+function fmtDur(s){s=s||0;const m=Math.floor(s/60),r=Math.round(s%60);return m+':'+String(r).padStart(2,'0');}
+function fmtDT(iso){if(!iso)return '—';const d=new Date(iso);return d.toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}
+function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+const LANG={hi:'Hindi',gu:'Gujarati',en:'English',mr:'Marathi',unknown:'Unknown'};
+
+function filterQS(){
+  const p=new URLSearchParams();
+  if($('fromDate').value)p.set('from',$('fromDate').value);
+  if($('toDate').value)p.set('to',$('toDate').value);
+  if($('sourceFilter').value)p.set('source',$('sourceFilter').value);
+  if($('search').value.trim())p.set('q',$('search').value.trim());
+  const s=p.toString();return s?('?'+s):'';
+}
+async function loadAll(){
+  const [sum,calls]=await Promise.all([
+    api('/api/v1/analytics/summary').then(r=>r.json()),
+    api('/api/v1/analytics/calls'+filterQS()).then(r=>r.json()),
+  ]);
+  state.summary=sum;state.calls=calls.items||[];
+  renderStats();renderChart();renderBreakdown();renderRows();
+  $('updated').textContent='Updated '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+}
+async function fetchCalls(){
+  try{const r=await api('/api/v1/analytics/calls'+filterQS()).then(r=>r.json());state.calls=r.items||[];renderRows();}
+  catch(e){if(e.message!=='unauthorized')toast('Failed to load calls','error');}
+}
+
+function renderStats(){
+  const s=state.summary||{};
+  const avg=s.total_calls?Math.round((s.total_seconds||0)/s.total_calls):0;
+  const cards=[
+    {label:'Total calls',value:fmtNum(s.total_calls),cls:'cy',sub:(s.by_source?Object.entries(s.by_source).map(([k,v])=>k+': '+v).join(' · '):'')},
+    {label:'Total minutes',value:(s.total_minutes!=null?s.total_minutes.toFixed(1):'—')},
+    {label:'Avg call length',value:fmtDur(avg)},
+    {label:'Bookings',value:fmtNum(s.bookings),cls:'gr'},
+    {label:'Booking conversion',value:fmtPct(s.booking_conversion_rate),cls:'gr'},
+    {label:'Calls this month',value:fmtNum((s.this_month||{}).calls),cls:'hi'},
+  ];
+  $('stats').innerHTML=cards.map(c=>
+    '<div class="stat '+(c.cls||'')+'"><div class="label">'+c.label+'</div><div class="value">'+c.value+'</div>'+(c.sub?'<div class="sub">'+esc(c.sub)+'</div>':'')+'</div>'
+  ).join('');
+}
+function renderChart(){
+  const days=(state.summary||{}).by_day||[];
+  if(!days.length){$('chart').innerHTML='<div style="color:var(--muted);font-size:0.75rem;">No data yet.</div>';return;}
+  const max=Math.max(...days.map(d=>d.calls),1);
+  $('chart').innerHTML=days.slice(-30).map(d=>{
+    const h=Math.round((d.calls/max)*130);
+    return '<div class="col" title="'+d.date+': '+d.calls+' calls"><div class="cbar" style="height:'+h+'px"></div><div class="clabel">'+d.date.slice(5)+'</div></div>';
+  }).join('');
+}
+function renderBreakdown(){
+  const s=state.summary||{};
+  const lang=s.by_language||{};const src=s.by_source||{};
+  const total=Object.values(lang).reduce((a,b)=>a+b,0)||1;
+  let h='<div style="font-size:0.66rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:10px;">By language</div>';
+  h+=Object.entries(lang).sort((a,b)=>b[1]-a[1]).map(([k,v])=>{
+    const pct=Math.round(v/total*100);
+    return '<div class="bar-row"><span class="k">'+(LANG[k]||k)+'</span><span class="track"><span class="fill" style="width:'+pct+'%"></span></span><span class="v">'+v+'</span></div>';
+  }).join('')||'<div style="color:var(--muted);font-size:0.72rem;">—</div>';
+  h+='<div style="font-size:0.66rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin:16px 0 10px;">By source</div>';
+  const tsrc=Object.values(src).reduce((a,b)=>a+b,0)||1;
+  h+=Object.entries(src).sort((a,b)=>b[1]-a[1]).map(([k,v])=>{
+    const pct=Math.round(v/tsrc*100);
+    return '<div class="bar-row"><span class="k">'+esc(k)+'</span><span class="track"><span class="fill" style="width:'+pct+'%"></span></span><span class="v">'+v+'</span></div>';
+  }).join('')||'<div style="color:var(--muted);font-size:0.72rem;">—</div>';
+  $('breakdown').innerHTML=h;
+}
+function renderRows(){
+  const rows=state.calls;
+  $('count').textContent=rows.length+' call'+(rows.length===1?'':'s');
+  $('rows').innerHTML=rows.map(c=>
+    '<tr onclick="openCall(\\''+c.id+'\\')">'+
+    '<td>'+fmtDT(c.started_at)+'</td>'+
+    '<td>'+esc(c.caller||'—')+'</td>'+
+    '<td>'+esc(c.source||'—')+'</td>'+
+    '<td class="num">'+fmtDur(c.duration_seconds)+'</td>'+
+    '<td>'+esc(LANG[c.language]||c.language||'—')+'</td>'+
+    '<td>'+esc(c.status||'—')+'</td>'+
+    '<td>'+(c.booking_created?'<span class="pill yes">Booked</span>':'<span class="pill no">—</span>')+'</td>'+
+    '</tr>'
+  ).join('')||'<tr><td colspan="7" style="color:var(--muted);text-align:center;padding:24px;">No calls found.</td></tr>';
+}
+async function openCall(id){
+  try{
+    const c=await api('/api/v1/analytics/calls/'+id).then(r=>r.json());
+    let h='<h2>'+esc(c.caller||'Call')+'</h2>';
+    h+='<div style="color:var(--muted);font-size:0.75rem;margin-bottom:14px;">'+fmtDT(c.started_at)+' · '+fmtDur(c.duration_seconds)+' · '+esc(LANG[c.language]||c.language||'—')+' · '+esc(c.source||'')+'</div>';
+    h+='<div style="margin-bottom:14px;">'+(c.booking_created?'<span class="pill yes">Booking confirmed</span>':'<span class="pill no">No booking</span>')+'</div>';
+    if((c.tool_calls||[]).length){
+      h+='<div class="section-title" style="margin:6px 0 8px;">Actions</div>';
+      h+=c.tool_calls.map(t=>'<div class="msg gemini"><div class="who">'+esc(t.name)+'</div>'+esc(JSON.stringify(t.args||{}))+'</div>').join('');
+    }
+    h+='<div class="section-title" style="margin:16px 0 8px;">Transcript</div>';
+    h+=(c.transcript||[]).map(m=>'<div class="msg '+(m.role==='user'?'user':'gemini')+'"><div class="who">'+esc(m.role)+'</div>'+esc(m.text)+'</div>').join('')||'<div style="color:var(--muted);font-size:0.75rem;">No transcript.</div>';
+    $('drawerBody').innerHTML=h;
+    $('drawer').classList.add('open');$('overlay').classList.add('on');
+  }catch(e){if(e.message!=='unauthorized')toast('Failed to load call','error');}
+}
+function closeDrawer(){$('drawer').classList.remove('open');$('overlay').classList.remove('on');}
+function exportCSV(){
+  const url='/api/v1/analytics/calls.csv'+filterQS();
+  fetch(url,{headers:{'Authorization':'Bearer '+KEY()}}).then(r=>r.blob()).then(b=>{
+    const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='call_analytics.csv';a.click();
+  }).catch(()=>toast('Export failed','error'));
+}
+function toast(msg,type){const t=document.createElement('div');t.className='toast'+(type?' '+type:'');t.textContent=msg;$('toasts').appendChild(t);setTimeout(()=>t.remove(),3200);}
+
+$('loginBtn').onclick=login;
+$('keyInput').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
+$('logoutBtn').onclick=logout;
+$('csvBtn').onclick=exportCSV;
+$('sourceFilter').onchange=fetchCalls;
+$('fromDate').onchange=fetchCalls;
+$('toDate').onchange=fetchCalls;
+let st;$('search').addEventListener('input',()=>{clearTimeout(st);st=setTimeout(fetchCalls,300);});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer();});
+
+(async()=>{
+  if(KEY()){try{await loadAll();showDash(true);}catch(e){showDash(false);}}
+  else showDash(false);
+})();
+</script>
+</body>
+</html>"""
+
+
 # ============ ADMIN DASHBOARD (call logs, transcripts, costing) ============
 
 def require_admin(request: Request):
@@ -1158,6 +1464,62 @@ def _filters_from_request(request: Request):
         "booking": qp.get("booking"),
         "limit": qp.get("limit"),
         "offset": qp.get("offset"),
+    }
+
+
+# ============ CLIENT-FACING ANALYTICS API (cost-free) ============
+# The client resells the calls, so NONE of our cost/margin data may be exposed.
+# These endpoints are gated by a SEPARATE key (ANALYTICS_API_KEY) and every
+# response is built with a whitelist so no cost/token field can ever leak.
+
+def require_client_api(request: Request):
+    """Gate /api/v1/analytics/* with ANALYTICS_API_KEY (Bearer / X-API-Key / ?key=)."""
+    if not ANALYTICS_API_KEY:
+        raise HTTPException(status_code=503, detail="Analytics API not configured")
+    auth = request.headers.get("Authorization") or ""
+    bearer = auth[7:] if auth.lower().startswith("bearer ") else ""
+    key = bearer or request.headers.get("X-API-Key") or request.query_params.get("key") or ""
+    if not secrets.compare_digest(str(key), str(ANALYTICS_API_KEY)):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+# Whitelisted fields that are safe to expose to the client (NO cost/token data).
+_PUBLIC_CALL_FIELDS = (
+    "id", "started_at", "ended_at", "duration_seconds", "language",
+    "status", "source", "caller", "booking_created",
+)
+_PUBLIC_CALL_DETAIL_FIELDS = ("transcript", "tool_calls")
+
+
+def public_call(call, include_detail=False):
+    """Return a cost-free view of a call (whitelist — never leaks cost/tokens)."""
+    if not call:
+        return None
+    out = {k: call.get(k) for k in _PUBLIC_CALL_FIELDS}
+    if include_detail:
+        for k in _PUBLIC_CALL_DETAIL_FIELDS:
+            out[k] = call.get(k)
+    return out
+
+
+def public_summary(s):
+    """Return a cost-free aggregate summary (whitelist)."""
+    if not s:
+        return {}
+    return {
+        "total_calls": s.get("total_calls", 0),
+        "by_source": s.get("by_source", {}),
+        "by_language": s.get("by_language", {}),
+        "total_minutes": s.get("total_minutes", 0),
+        "total_seconds": s.get("total_seconds", 0),
+        "bookings": s.get("bookings", 0),
+        "booking_conversion_rate": s.get("booking_conversion_rate", 0),
+        # by_day: keep only date + call count (drop cost columns)
+        "by_day": [
+            {"date": d.get("date"), "calls": d.get("calls", 0)}
+            for d in (s.get("by_day") or [])
+        ],
+        "this_month": {"calls": (s.get("this_month") or {}).get("calls", 0)},
     }
 
 
@@ -1290,6 +1652,61 @@ async def admin_call_refresh(call_id: str, request: Request):
     require_admin(request)
     updated = await _refresh_call_price(call_id)
     return {"updated": bool(updated)}
+
+
+# ============ CLIENT ANALYTICS ROUTES (cost-free, Bearer-gated) ============
+
+@app.get("/analytics")
+async def analytics_dashboard():
+    """Client-facing analytics dashboard — usage & bookings, no cost data."""
+    return HTMLResponse(CLIENT_ANALYTICS_HTML)
+
+
+@app.get("/api/v1/analytics/summary")
+async def v1_analytics_summary(request: Request):
+    require_client_api(request)
+    filters = _filters_from_request(request)
+    return JSONResponse(public_summary(await store.summary(filters)))
+
+
+@app.get("/api/v1/analytics/calls")
+async def v1_analytics_calls(request: Request):
+    require_client_api(request)
+    filters = _filters_from_request(request)
+    if filters.get("limit") is None:
+        filters["limit"] = 500
+    data = await store.list_calls(filters)
+    return JSONResponse({
+        "items": [public_call(c) for c in data["items"]],
+        "total": data["total"],
+    })
+
+
+@app.get("/api/v1/analytics/calls.csv")
+async def v1_analytics_calls_csv(request: Request):
+    require_client_api(request)
+    filters = _filters_from_request(request)
+    filters["limit"] = None
+    data = await store.list_calls(filters)
+    buf = io.StringIO()
+    cols = ["started_at", "source", "caller", "duration_seconds",
+            "language", "status", "booking_created"]
+    writer = csv.writer(buf)
+    writer.writerow(cols)
+    for c in data["items"]:
+        pc = public_call(c)
+        writer.writerow([pc.get(k) for k in cols])
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=call_analytics.csv"})
+
+
+@app.get("/api/v1/analytics/calls/{call_id}")
+async def v1_analytics_call_detail(call_id: str, request: Request):
+    require_client_api(request)
+    call = await store.load_call(call_id)
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return JSONResponse(public_call(call, include_detail=True))
 
 
 if __name__ == "__main__":

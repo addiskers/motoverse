@@ -1491,14 +1491,33 @@ _PUBLIC_CALL_FIELDS = (
 _PUBLIC_CALL_DETAIL_FIELDS = ("transcript", "tool_calls")
 
 
+def _sanitize_transcript(transcript):
+    """Neutralize the AI role so the client can't tell which model we use.
+    'gemini' -> 'agent'; keep only role/text/ts."""
+    out = []
+    for m in (transcript or []):
+        role = "agent" if m.get("role") == "gemini" else m.get("role")
+        out.append({"role": role, "text": m.get("text"), "ts": m.get("ts")})
+    return out
+
+
+def _sanitize_tool_calls(tool_calls):
+    """Expose only the action taken, not internal implementation detail."""
+    out = []
+    for t in (tool_calls or []):
+        out.append({"name": t.get("name"), "args": t.get("args"),
+                    "result": t.get("result"), "ts": t.get("ts")})
+    return out
+
+
 def public_call(call, include_detail=False):
-    """Return a cost-free view of a call (whitelist — never leaks cost/tokens)."""
+    """Return a cost-free view of a call (whitelist — never leaks cost/tokens/model)."""
     if not call:
         return None
     out = {k: call.get(k) for k in _PUBLIC_CALL_FIELDS}
     if include_detail:
-        for k in _PUBLIC_CALL_DETAIL_FIELDS:
-            out[k] = call.get(k)
+        out["transcript"] = _sanitize_transcript(call.get("transcript"))
+        out["tool_calls"] = _sanitize_tool_calls(call.get("tool_calls"))
     return out
 
 

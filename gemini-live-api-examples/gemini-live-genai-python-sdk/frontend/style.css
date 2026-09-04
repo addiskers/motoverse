@@ -419,6 +419,43 @@ body::before {
 .call-me-status.loading { color: var(--accent-cyan); }
 .call-btn-note { opacity: 0.7; }
 
+/* ===== MICROPHONE TIP + BANNER ===== */
+.mic-tip {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  text-align: left;
+  margin: 16px auto 0;
+  max-width: 440px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 212, 255, 0.06);
+  border: 1px solid rgba(0, 212, 255, 0.18);
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--text-secondary, var(--text-muted));
+}
+.mic-tip svg { flex-shrink: 0; color: var(--accent-cyan); margin-top: 2px; }
+.mic-tip strong { color: var(--text-primary); }
+.mic-tip em { font-style: normal; color: var(--accent-cyan); font-weight: 600; }
+.mic-tip span { display: block; margin-top: 3px; }
+
+.mic-banner {
+  margin: 12px auto 0;
+  max-width: 720px;
+  width: calc(100% - 32px);
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  color: var(--text-primary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  position: relative;
+  z-index: 5;
+}
+.mic-banner strong { color: #fbbf24; }
+
 /* ===== ACTIVE CALL DASHBOARD ===== */
 .app-section {
   flex: 1;

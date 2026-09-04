@@ -132,7 +132,7 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 | Field | Meaning |
 |-------|---------|
 | `duration_seconds` | Call length in seconds |
-| `language` | Detected language: `hi` Hindi, `gu` Gujarati, `en` English, `mr` Marathi, `unknown` |
+| `language` | Detected from the customer's speech: `hi` Hindi, `gu` Gujarati, `en` English, `mr` Marathi, `te` Telugu, `kn` Kannada, `ta` Tamil, `ml` Malayalam, `bn` Bengali, `pa` Punjabi, `or` Odia. `unknown` = customer spoke but the script wasn't recognised. `no_speech` = the customer never spoke (usually a blocked microphone or an immediate hang-up). |
 | `status` | `completed`, `abandoned`, `in_progress` |
 | `source` | `browser` (web demo) or `twilio` (phone) |
 | `booking_created` | `true` if a service pickup was booked on the call |

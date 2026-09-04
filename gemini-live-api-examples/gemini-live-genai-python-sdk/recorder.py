@@ -38,26 +38,82 @@ def _out_bucket(mod):
     return "text_out"
 
 
-def _infer_language(text):
-    """Best-effort language guess from the first user turn (Unicode blocks)."""
-    if not text:
-        return None
-    gu = hi = latin = 0
-    for ch in text:
+# Unicode script ranges -> language code. Devanagari is shared by Hindi/Marathi;
+# we report it as "hi" (the demo's primary language).
+_SCRIPT_RANGES = (
+    (0x0900, 0x097F, "hi"),   # Devanagari
+    (0x0980, 0x09FF, "bn"),   # Bengali
+    (0x0A00, 0x0A7F, "pa"),   # Gurmukhi (Punjabi)
+    (0x0A80, 0x0AFF, "gu"),   # Gujarati
+    (0x0B00, 0x0B7F, "or"),   # Odia
+    (0x0B80, 0x0BFF, "ta"),   # Tamil
+    (0x0C00, 0x0C7F, "te"),   # Telugu
+    (0x0C80, 0x0CFF, "kn"),   # Kannada
+    (0x0D00, 0x0D7F, "ml"),   # Malayalam
+)
+
+# Very common Hindi function words as they appear when speech is transcribed in
+# Roman letters ("Hinglish"). Two or more distinct hits in Latin text => "hi".
+# Deliberately excludes words that are also ordinary English ("main", "do", "lo").
+_HINGLISH_WORDS = {
+    "haan", "han", "nahi", "nahin", "kya", "kyu", "kyun", "bolo", "boliye",
+    "theek", "thik", "mein", "aap", "aapka", "aapki", "hai", "hain",
+    "karo", "kar", "karna", "gaadi", "gadi", "kal", "parso", "abhi", "achha",
+    "accha", "acha", "ji", "haanji", "kaun", "kab", "kaise", "kitna",
+    "batao", "bata", "chahiye", "dena", "matlab", "wala", "wali",
+}
+
+
+def _script_counts(text):
+    counts = {}
+    latin = 0
+    for ch in text or "":
         o = ord(ch)
-        if 0x0A80 <= o <= 0x0AFF:
-            gu += 1
-        elif 0x0900 <= o <= 0x097F:
-            hi += 1
-        elif ("a" <= ch.lower() <= "z"):
+        if ("a" <= ch.lower() <= "z"):
             latin += 1
-    if gu and gu >= hi:
-        return "gu"
-    if hi:
-        return "hi"          # Devanagari (Hindi/Marathi share the script)
+            continue
+        for lo, hi, code in _SCRIPT_RANGES:
+            if lo <= o <= hi:
+                counts[code] = counts.get(code, 0) + 1
+                break
+    return counts, latin
+
+
+def _looks_hinglish(text):
+    words = {w.strip(".,?!।'\"").lower() for w in (text or "").split()}
+    return len(words & _HINGLISH_WORDS) >= 2
+
+
+def infer_language_from_turns(user_texts):
+    """
+    Best-effort language for a whole call from ALL customer turns.
+
+    Using every turn (rather than only the first) makes this robust to the
+    first utterance being mis-transcribed in an unrelated script, which the
+    Live API occasionally does on unclear audio.
+
+    Returns: an ISO-ish code (hi, gu, en, te, kn, ta, ml, bn, pa, or),
+             "unknown" if the customer spoke but no script was recognised,
+             or None if there were no customer turns at all.
+    """
+    texts = [t for t in (user_texts or []) if t and t.strip()]
+    if not texts:
+        return None
+    joined = " ".join(texts)
+    counts, latin = _script_counts(joined)
+    if counts:
+        best = max(counts.items(), key=lambda kv: kv[1])
+        # Prefer a recognised Indian script over Latin unless Latin clearly dominates.
+        if best[1] * 3 >= latin:
+            return best[0]
     if latin:
-        return "en"
+        return "hi" if _looks_hinglish(joined) else "en"
     return "unknown"
+
+
+def _infer_language(text):
+    """Kept for backwards compatibility; prefer infer_language_from_turns."""
+    return infer_language_from_turns([text])
 
 
 class CallRecorder:
@@ -67,7 +123,6 @@ class CallRecorder:
         self._cur_role = None     # 'user' | 'gemini' currently buffering
         self._cur_text = []
         self._usage = []          # list of per-event usage snapshots
-        self._lang_decided = False
         self._closed = False
         self._started_ts = None
 
@@ -136,6 +191,11 @@ class CallRecorder:
             if self.call.get("status") == "in_progress":
                 self.call["status"] = status
 
+            # Customer never said a word (mic blocked / instant hang-up). Record
+            # that explicitly so analytics can separate it from unrecognised speech.
+            if not any(m.get("role") == "user" for m in self.call["transcript"]):
+                self.call["language"] = "no_speech"
+
             self.call["tokens"] = self._finalize_tokens()
             self.call["gemini_cost_usd"] = pricing.compute_gemini_cost(self.call["tokens"])
             total, estimated = pricing.compute_total(self.call)
@@ -173,11 +233,13 @@ class CallRecorder:
             self.call["transcript"].append(
                 {"role": self._cur_role, "text": text, "ts": _now_iso()}
             )
-            if not self._lang_decided and self._cur_role == "user":
-                lang = _infer_language(text)
+            if self._cur_role == "user":
+                # Re-derive from ALL customer turns so far, so a mis-transcribed
+                # first utterance can't lock in a wrong language.
+                user_texts = [m["text"] for m in self.call["transcript"] if m.get("role") == "user"]
+                lang = infer_language_from_turns(user_texts)
                 if lang:
                     self.call["language"] = lang
-                    self._lang_decided = True
         self._cur_role = None
         self._cur_text = []
 

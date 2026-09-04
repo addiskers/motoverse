@@ -389,10 +389,87 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+// --- Microphone permission helpers ---
+const micBanner = document.getElementById("mic-banner");
+const UA = navigator.userAgent || "";
+const IS_IOS = /iPad|iPhone|iPod/.test(UA) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const IS_ANDROID = /Android/i.test(UA);
+// Links opened from chat apps land in an embedded browser that usually can't use the mic.
+const IS_IN_APP =
+  /WhatsApp|Instagram|FBAN|FBAV|FB_IAB|Messenger|LinkedIn|Twitter|Snapchat|Line\//i.test(UA) ||
+  (IS_ANDROID && /\bwv\b/.test(UA)) ||
+  (IS_IOS && !/Safari/i.test(UA) && !/CriOS|FxiOS|EdgiOS/i.test(UA));
+
+function showMicBanner(html) {
+  if (!micBanner) return;
+  micBanner.innerHTML = html;
+  micBanner.classList.remove("hidden");
+}
+function hideMicBanner() {
+  if (micBanner) micBanner.classList.add("hidden");
+}
+
+function micFixSteps() {
+  if (IS_IN_APP) {
+    return "This page opened inside an app’s built-in browser, which blocks the microphone. Tap the <strong>⋯</strong> or <strong>share</strong> icon and choose <strong>“Open in " + (IS_IOS ? "Safari" : "Chrome") + "”</strong>, then start the call again.";
+  }
+  if (IS_IOS) {
+    return "In Safari, tap the <strong>aA</strong> icon in the address bar → <strong>Website Settings</strong> → <strong>Microphone</strong> → <strong>Allow</strong>, then reload this page.";
+  }
+  if (IS_ANDROID) {
+    return "Tap the <strong>lock icon</strong> next to the address → <strong>Permissions</strong> → <strong>Microphone</strong> → <strong>Allow</strong>, then reload this page.";
+  }
+  return "Click the <strong>lock / camera icon</strong> in the address bar, allow the <strong>Microphone</strong>, then reload this page.";
+}
+
+function describeMicError(err) {
+  const name = (err && err.name) || "";
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return "<strong>Microphone isn’t available in this browser.</strong> " + micFixSteps();
+  }
+  if (name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError") {
+    return "<strong>Microphone access was blocked</strong>, so the assistant can’t hear you. " + micFixSteps();
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return "<strong>No microphone was found.</strong> Connect or enable a microphone, then reload this page.";
+  }
+  if (name === "NotReadableError" || name === "AbortError") {
+    return "<strong>Your microphone is busy or unavailable.</strong> Close other apps that are using it (calls, recorders), then reload this page.";
+  }
+  return "<strong>Couldn’t start the microphone.</strong> " + micFixSteps();
+}
+
+// Ask for the mic BEFORE starting the call, so a blocked mic never produces a
+// silent call. The browser remembers the answer, so real capture won't re-prompt.
+async function preflightMic() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    const e = new Error("getUserMedia unsupported");
+    e.name = "NotSupportedError";
+    throw e;
+  }
+  const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+  s.getTracks().forEach((t) => t.stop());
+}
+
+if (IS_IN_APP) {
+  showMicBanner("<strong>Heads up:</strong> " + micFixSteps());
+}
+
 // --- Connect ---
 connectBtn.onclick = async () => {
   setStatus("disconnected", "Connecting...");
   connectBtn.disabled = true;
+  hideMicBanner();
+
+  try {
+    await preflightMic();
+  } catch (error) {
+    console.error("Microphone permission error:", error);
+    showMicBanner(describeMicError(error));
+    setStatus("error", "Microphone blocked");
+    connectBtn.disabled = false;
+    return;
+  }
 
   try {
     await mediaHandler.initializeAudio();
@@ -414,11 +491,16 @@ async function startMic() {
     });
     micBtn.classList.add("active");
     micBtn.dataset.active = "true";
+    hideMicBanner();
 
     // Start visualizer after mic is active (analyser nodes ready)
     initAudioVisualizer();
   } catch (e) {
     console.error("Could not start audio capture", e);
+    showMicBanner(describeMicError(e) + " After fixing it, tap the mic button to retry.");
+    setStatus("error", "Microphone blocked");
+    micBtn.classList.remove("active");
+    micBtn.dataset.active = "false";
   }
 }
 
@@ -623,6 +705,7 @@ function langLabel(code) {
 
 // --- Reset ---
 function resetUI() {
+  hideMicBanner();
   authSection.classList.remove("hidden");
   appSection.classList.add("hidden");
   sessionEndSection.classList.add("hidden");

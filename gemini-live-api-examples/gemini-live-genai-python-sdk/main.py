@@ -1321,7 +1321,7 @@ const fmtPct=(x)=>(x==null||isNaN(x))?'—':(x*100).toFixed(1)+'%';
 function fmtDur(s){s=s||0;const m=Math.floor(s/60),r=Math.round(s%60);return m+':'+String(r).padStart(2,'0');}
 function fmtDT(iso){if(!iso)return '—';const d=new Date(iso);return d.toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}
 function esc(s){return (s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-const LANG={hi:'Hindi',gu:'Gujarati',en:'English',mr:'Marathi',unknown:'Unknown'};
+const LANG={hi:'Hindi',gu:'Gujarati',en:'English',mr:'Marathi',te:'Telugu',kn:'Kannada',ta:'Tamil',ml:'Malayalam',bn:'Bengali',pa:'Punjabi',or:'Odia',unknown:'Unrecognised',no_speech:'No speech'};
 
 function filterQS(){
   const p=new URLSearchParams();

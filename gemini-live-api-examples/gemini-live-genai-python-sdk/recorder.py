@@ -154,6 +154,7 @@ class CallRecorder:
                 "cost_estimated": False,
                 "transcript": [],
                 "tool_calls": [],
+                "recording": None,               # set on close() if audio was saved
             }
             await store.save_call(self.call)
             logger.info(f"Recording call {call_id} ({source}, sid={call_sid})")
@@ -178,7 +179,7 @@ class CallRecorder:
         except Exception as e:
             logger.warning(f"CallRecorder.on_event failed: {e}")
 
-    async def close(self, status="completed"):
+    async def close(self, status="completed", recording=None):
         if self.call is None or self._closed:
             return
         self._closed = True
@@ -196,6 +197,7 @@ class CallRecorder:
             if not any(m.get("role") == "user" for m in self.call["transcript"]):
                 self.call["language"] = "no_speech"
 
+            self.call["recording"] = recording
             self.call["tokens"] = self._finalize_tokens()
             self.call["gemini_cost_usd"] = pricing.compute_gemini_cost(self.call["tokens"])
             total, estimated = pricing.compute_total(self.call)

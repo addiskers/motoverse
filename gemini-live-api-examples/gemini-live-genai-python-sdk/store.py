@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
 CALLS_DIR = os.path.join(DATA_DIR, "calls")
+RECORDINGS_DIR = os.path.join(DATA_DIR, "recordings")
+
+
+def recording_path(call_id):
+    return os.path.join(RECORDINGS_DIR, f"{call_id}.wav")
 
 # call_id -> lightweight meta (full record minus transcript/tool_calls)
 _INDEX = {}
@@ -246,3 +251,42 @@ async def sweep_stale(max_age_minutes=30):
             call["status"] = "abandoned"
             await save_call(call)
             logger.info(f"Marked stale call {cid} as abandoned")
+
+
+def _old_recordings_sync(retention_days):
+    if retention_days <= 0 or not os.path.isdir(RECORDINGS_DIR):
+        return []
+    cutoff = datetime.now(timezone.utc).timestamp() - retention_days * 86400
+    old = []
+    for name in os.listdir(RECORDINGS_DIR):
+        if not name.endswith(".wav"):
+            continue
+        path = os.path.join(RECORDINGS_DIR, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                old.append((name[:-4], path, os.path.getsize(path)))
+        except OSError:
+            continue
+    return old
+
+
+async def sweep_recordings(retention_days):
+    """Delete call recordings older than `retention_days` and clear the call's
+    `recording` field. Returns {"deleted": n, "bytes": total}."""
+    old = await _run(_old_recordings_sync, retention_days)
+    deleted = freed = 0
+    for call_id, path, size in old:
+        try:
+            await _run(os.remove, path)
+            deleted += 1
+            freed += size
+        except OSError as e:
+            logger.warning(f"Could not delete recording {path}: {e}")
+            continue
+        call = await load_call(call_id)
+        if call and call.get("recording"):
+            call["recording"] = None
+            await save_call(call)
+    if deleted:
+        logger.info(f"Recording retention: deleted {deleted} files, {freed} bytes")
+    return {"deleted": deleted, "bytes": freed}

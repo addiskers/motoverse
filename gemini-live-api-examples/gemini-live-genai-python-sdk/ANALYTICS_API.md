@@ -71,7 +71,8 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
       "status": "completed",
       "source": "browser",
       "caller": "web-a1b2c3",
-      "booking_created": true
+      "booking_created": true,
+      "has_recording": true
     }
   ]
 }
@@ -96,6 +97,9 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
   "source": "browser",
   "caller": "web-a1b2c3",
   "booking_created": true,
+  "has_recording": true,
+  "recording_url": "/api/v1/analytics/calls/a1b2c3/recording",
+  "recording_duration_seconds": 138.4,
   "transcript": [
     { "role": "agent", "text": "Namaste! Main Rahul bol raha hoon...", "ts": "..." },
     { "role": "user", "text": "Haan boliye", "ts": "..." }
@@ -114,6 +118,20 @@ Columns: `started_at, source, caller, duration_seconds, language, status, bookin
 curl -H "Authorization: Bearer YOUR_API_KEY" \
   "https://aicalling.autoverseai.in/api/v1/analytics/calls.csv?from=2026-09-01" -o calls.csv
 ```
+
+### 5. `GET /api/v1/analytics/calls/{id}/recording`
+The call's audio recording (both sides mixed) as a WAV file, `audio/wav`, mono 16 kHz.
+Only available when the call's `has_recording` is `true`; otherwise returns `404`.
+Recordings are kept for a limited retention period (currently 30 days), after which
+`has_recording` becomes `false`. Calls made before recording was enabled have no audio.
+
+```bash
+curl -H "Authorization: Bearer YOUR_API_KEY" \
+  https://aicalling.autoverseai.in/api/v1/analytics/calls/a1b2c3/recording -o call_a1b2c3.wav
+```
+
+To play it in a browser dashboard, fetch it with the `Authorization` header, create an
+object URL from the blob, and set it as the `src` of an `<audio controls>` element.
 
 ---
 
@@ -139,5 +157,8 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 | `booking_conversion_rate` | bookings ÷ total calls (0–1) |
 | `transcript[].role` | `user` (the customer) or `agent` (the AI assistant) |
 | `tool_calls[]` | Actions the assistant took during the call (e.g. `schedule_pickup`) |
+| `has_recording` | `true` if an audio recording is available for this call |
+| `recording_url` | Path of the recording endpoint (detail only; `null` when no recording) |
+| `recording_duration_seconds` | Length of the audio file (detail only) |
 
 > Note: This API intentionally does not expose any cost, pricing, or token-usage data.

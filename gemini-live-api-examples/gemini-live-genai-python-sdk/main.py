@@ -18,6 +18,7 @@ from twilio_handler import TwilioMediaBridge
 import pricing
 import store
 from recorder import CallRecorder
+from audio_recorder import AudioRecorder
 
 # Load environment variables
 load_dotenv()
@@ -40,6 +41,10 @@ ANALYTICS_SECRET = os.getenv("ANALYTICS_SECRET", "kataria2026")
 # 503 so it can never ship open. This key is safe to share with the client's
 # developers; it exposes only cost-free usage data, never our internal /admin.
 ANALYTICS_API_KEY = os.getenv("ANALYTICS_API_KEY", "")
+
+# Call audio recording (one mono 16 kHz WAV per call under DATA_DIR/recordings).
+RECORD_CALLS = os.getenv("RECORD_CALLS", "true").strip().lower() in ("1", "true", "yes", "on")
+RECORDING_RETENTION_DAYS = float(os.getenv("RECORDING_RETENTION_DAYS", "30") or 0)
 
 # ============ MOCK BACKEND DATA ============
 
@@ -130,6 +135,16 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
 
+async def _recording_sweep_loop():
+    """Delete recordings past RECORDING_RETENTION_DAYS, now and every 6 hours."""
+    while True:
+        try:
+            await store.sweep_recordings(RECORDING_RETENTION_DAYS)
+        except Exception as e:
+            logger.warning(f"Recording sweep failed: {e}")
+        await asyncio.sleep(6 * 3600)
+
+
 @app.on_event("startup")
 async def _startup():
     """Initialize the call store and clean up any calls orphaned by a crash."""
@@ -138,6 +153,8 @@ async def _startup():
         await store.sweep_stale()
     except Exception as e:
         logger.error(f"Call store init failed: {e}")
+    if RECORDING_RETENTION_DAYS > 0:
+        asyncio.create_task(_recording_sweep_loop())
 
 
 @app.get("/")
@@ -154,6 +171,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     recorder = CallRecorder(model=MODEL)
     await recorder.open(source="browser")
+    audio = AudioRecorder(enabled=RECORD_CALLS)
 
     audio_input_queue = asyncio.Queue()
     video_input_queue = asyncio.Queue()
@@ -163,13 +181,14 @@ async def websocket_endpoint(websocket: WebSocket):
 
     async def audio_output_callback(data):
         if not client_disconnected:
+            audio.add_output(data)
             try:
                 await websocket.send_bytes(data)
             except Exception:
                 pass
 
     async def audio_interrupt_callback():
-        pass
+        audio.on_interrupt()
 
     gemini_client = GeminiLive(
         api_key=GEMINI_API_KEY,
@@ -191,6 +210,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 message = await websocket.receive()
 
                 if message.get("bytes"):
+                    audio.add_input(message["bytes"])
                     await audio_input_queue.put(message["bytes"])
                 elif message.get("text"):
                     text = message["text"]
@@ -277,7 +297,10 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.error(f"Error in Gemini session: {type(e).__name__}: {e}\n{traceback.format_exc()}")
     finally:
         receive_task.cancel()
-        await recorder.close()
+        recording = None
+        if recorder.call:
+            recording = await audio.finalize(store.recording_path(recorder.call["id"]))
+        await recorder.close(recording=recording)
         try:
             await websocket.close()
         except:
@@ -324,6 +347,7 @@ async def twilio_media_stream(websocket: WebSocket):
     )
 
     recorder = CallRecorder(model=MODEL)
+    audio = AudioRecorder(enabled=RECORD_CALLS)
 
     async def broadcast_event(event):
         """Send transcript events to all live watchers AND record the call."""
@@ -333,7 +357,10 @@ async def twilio_media_stream(websocket: WebSocket):
             await recorder.open(source="twilio", call_sid=event.get("call_sid") or None,
                                 caller=event.get("caller"))
         elif etype == "call_end":
-            await recorder.close()
+            recording = None
+            if recorder.call:
+                recording = await audio.finalize(store.recording_path(recorder.call["id"]))
+            await recorder.close(recording=recording)
         else:
             await recorder.on_event(event)
 
@@ -350,6 +377,7 @@ async def twilio_media_stream(websocket: WebSocket):
         gemini_client=gemini_client,
         text_trigger="Hi, I have picked up the phone. Please start the call.",
         on_event=broadcast_event,
+        audio_recorder=audio,
     )
 
     try:
@@ -1081,10 +1109,22 @@ function renderDrawer(c){
         '</div>'+
       '</div>'+
       '<div class="kv" style="padding:8px 2px;"><span>Total real cost</span><span style="font-weight:700;">'+fmtUSD(cb.total_cost_usd)+'</span></div>'+
+      (c.recording&&c.recording.path?'<div class="sub-h">Recording'+(c.recording.duration_seconds?' · '+fmtDur(c.recording.duration_seconds):'')+'</div><div id="adminRecMount" class="empty">Loading recording…</div>':'')+
       '<div class="sub-h">Tool calls</div>'+tcalls+
       '<div class="sub-h">Transcript</div>'+tr+
       '<button class="btn ghost" style="margin-top:16px;width:100%;" onclick="exportCall(\\''+c.id+'\\')">Export call JSON</button>'+
     '</div>';
+  if(c.recording&&c.recording.path)loadAdminRecording(c.id);
+}
+async function loadAdminRecording(id){
+  const el=$('adminRecMount');if(!el)return;
+  try{
+    const b=await api('/api/admin/calls/'+id+'/recording').then(r=>r.blob());
+    const u=URL.createObjectURL(b);
+    el.className='';
+    el.innerHTML='<audio controls preload="metadata" src="'+u+'" style="width:100%;margin:6px 0;"></audio>'+
+      '<a href="'+u+'" download="call_'+id+'.wav" style="font-size:0.72rem;">Download recording</a>';
+  }catch(e){el.textContent='Recording unavailable.';}
 }
 async function refreshOne(id){
   toast('Refreshing price…','info');
@@ -1411,13 +1451,27 @@ async function openCall(id){
       h+='<div class="section-title" style="margin:6px 0 8px;">Actions</div>';
       h+=c.tool_calls.map(t=>'<div class="msg gemini"><div class="who">'+esc(t.name)+'</div>'+esc(JSON.stringify(t.args||{}))+'</div>').join('');
     }
+    if(c.has_recording){
+      h+='<div class="section-title" style="margin:16px 0 8px;">Recording'+(c.recording_duration_seconds?' · '+fmtDur(c.recording_duration_seconds):'')+'</div>';
+      h+='<div id="recMount" style="color:var(--muted);font-size:0.75rem;">Loading recording…</div>';
+    }
     h+='<div class="section-title" style="margin:16px 0 8px;">Transcript</div>';
     h+=(c.transcript||[]).map(m=>'<div class="msg '+(m.role==='user'?'user':'gemini')+'"><div class="who">'+esc(m.role)+'</div>'+esc(m.text)+'</div>').join('')||'<div style="color:var(--muted);font-size:0.75rem;">No transcript.</div>';
     $('drawerBody').innerHTML=h;
     $('drawer').classList.add('open');$('overlay').classList.add('on');
+    if(c.has_recording)loadRecording('/api/v1/analytics/calls/'+id+'/recording','recMount','call_'+id+'.wav');
   }catch(e){if(e.message!=='unauthorized')toast('Failed to load call','error');}
 }
 function closeDrawer(){$('drawer').classList.remove('open');$('overlay').classList.remove('on');}
+async function loadRecording(url,mountId,filename){
+  const el=$(mountId);if(!el)return;
+  try{
+    const b=await api(url).then(r=>r.blob());
+    const u=URL.createObjectURL(b);
+    el.innerHTML='<audio controls preload="metadata" src="'+u+'" style="width:100%;margin-bottom:6px;"></audio>'+
+      '<a href="'+u+'" download="'+filename+'" style="font-size:0.72rem;">Download recording</a>';
+  }catch(e){el.innerHTML='<div style="color:var(--muted);font-size:0.75rem;">Recording unavailable.</div>';}
+}
 function exportCSV(){
   const url='/api/v1/analytics/calls.csv'+filterQS();
   fetch(url,{headers:{'Authorization':'Bearer '+KEY()}}).then(r=>r.blob()).then(b=>{
@@ -1515,10 +1569,29 @@ def public_call(call, include_detail=False):
     if not call:
         return None
     out = {k: call.get(k) for k in _PUBLIC_CALL_FIELDS}
+    rec = call.get("recording") or {}
+    out["has_recording"] = bool(rec.get("path"))
     if include_detail:
         out["transcript"] = _sanitize_transcript(call.get("transcript"))
         out["tool_calls"] = _sanitize_tool_calls(call.get("tool_calls"))
+        if out["has_recording"]:
+            out["recording_url"] = f"/api/v1/analytics/calls/{call.get('id')}/recording"
+            out["recording_duration_seconds"] = rec.get("duration_seconds")
+        else:
+            out["recording_url"] = None
+            out["recording_duration_seconds"] = None
     return out
+
+
+def _recording_file_response(call):
+    """Serve a call's WAV, or 404 if the call has none (or the file was swept)."""
+    rec = (call or {}).get("recording") or {}
+    if not rec.get("path"):
+        raise HTTPException(status_code=404, detail="No recording for this call")
+    path = store.recording_path(call["id"])
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Recording no longer available")
+    return FileResponse(path, media_type="audio/wav", filename=f"call_{call['id']}.wav")
 
 
 def public_summary(s):
@@ -1726,6 +1799,24 @@ async def v1_analytics_call_detail(call_id: str, request: Request):
     if not call:
         raise HTTPException(status_code=404, detail="Call not found")
     return JSONResponse(public_call(call, include_detail=True))
+
+
+@app.get("/api/v1/analytics/calls/{call_id}/recording")
+async def v1_analytics_call_recording(call_id: str, request: Request):
+    require_client_api(request)
+    call = await store.load_call(call_id)
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return _recording_file_response(call)
+
+
+@app.get("/api/admin/calls/{call_id}/recording")
+async def admin_call_recording(call_id: str, request: Request):
+    require_admin(request)
+    call = await store.load_call(call_id)
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return _recording_file_response(call)
 
 
 if __name__ == "__main__":

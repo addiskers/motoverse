@@ -98,13 +98,14 @@ def pcm24k_to_mulaw(pcm_bytes: bytes) -> bytes:
 class TwilioMediaBridge:
     """Bridges a Twilio Media Stream WebSocket with a Gemini Live session."""
 
-    def __init__(self, websocket, gemini_client, text_trigger, on_event=None):
+    def __init__(self, websocket, gemini_client, text_trigger, on_event=None, audio_recorder=None):
         self.ws = websocket
         self.gemini = gemini_client
         self.stream_sid = None
         self.call_sid = None
         self.text_trigger = text_trigger
         self.on_event = on_event  # async callback for live transcript
+        self.audio_recorder = audio_recorder  # optional AudioRecorder (call recording)
 
         # Queues for Gemini
         self.audio_input_queue = asyncio.Queue()
@@ -115,6 +116,8 @@ class TwilioMediaBridge:
         """Called when Gemini produces audio. Convert and send to Twilio."""
         if not self.stream_sid:
             return
+        if self.audio_recorder:
+            self.audio_recorder.add_output(data)
         try:
             mulaw = pcm24k_to_mulaw(data)
             payload = base64.b64encode(mulaw).decode("utf-8")
@@ -129,6 +132,8 @@ class TwilioMediaBridge:
 
     async def audio_interrupt_callback(self):
         """Called when Gemini detects user interruption. Clear Twilio buffer."""
+        if self.audio_recorder:
+            self.audio_recorder.on_interrupt()
         if not self.stream_sid:
             return
         try:
@@ -163,6 +168,8 @@ class TwilioMediaBridge:
                     payload = data["media"]["payload"]
                     mulaw_bytes = base64.b64decode(payload)
                     pcm_16k = mulaw_to_pcm16k(mulaw_bytes)
+                    if self.audio_recorder:
+                        self.audio_recorder.add_input(pcm_16k)
                     await self.audio_input_queue.put(pcm_16k)
 
                 elif event == "stop":

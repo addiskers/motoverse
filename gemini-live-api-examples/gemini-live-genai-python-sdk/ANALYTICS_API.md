@@ -133,6 +133,57 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 To play it in a browser dashboard, fetch it with the `Authorization` header, create an
 object URL from the blob, and set it as the `src` of an `<audio controls>` element.
 
+### 6. `GET /api/v1/analytics/search?phone={number}`
+**Everything for one customer in a single request.** Returns every call made with that
+phone number, newest first, and each call carries its full detail: transcript, actions
+taken, and recording. Country code and spacing don't matter: `9876543210`,
+`+919876543210`, and `+91 98765 43210` all match the same customer.
+
+```bash
+curl -H "Authorization: Bearer YOUR_API_KEY" \
+  "https://aicalling.autoverseai.in/api/v1/analytics/search?phone=9876543210"
+```
+
+```json
+{
+  "phone": "9876543210",
+  "total": 2,
+  "calls": [
+    {
+      "id": "a1b2c3",
+      "started_at": "2026-09-03T06:12:44+00:00",
+      "ended_at": "2026-09-03T06:15:02+00:00",
+      "duration_seconds": 138,
+      "language": "hi",
+      "status": "completed",
+      "source": "browser",
+      "caller": "+919876543210",
+      "booking_created": true,
+      "has_recording": true,
+      "recording_url": "/api/v1/analytics/calls/a1b2c3/recording",
+      "recording_duration_seconds": 138.4,
+      "transcript": [ { "role": "agent", "text": "...", "ts": "..." }, { "role": "user", "text": "...", "ts": "..." } ],
+      "tool_calls": [ { "name": "schedule_pickup", "args": { "date": "2026-09-10" }, "result": { "success": true }, "ts": "..." } ]
+    }
+  ]
+}
+```
+
+Returns `400` if `phone` is missing or shorter than 8 digits. Accepts the same `from`,
+`to`, `source`, and `booking` filters as the list endpoint, plus `limit` (default 100,
+max 200) and `offset`. An unknown number returns `200` with `"total": 0`.
+
+**Linking browser calls to a phone number.** Phone (Twilio) calls carry the caller's
+number automatically. Browser demo calls don't collect a number, so pass it on the
+link you send the customer and it is stored on the call:
+
+```
+https://aicalling.autoverseai.in/?phone=9876543210
+```
+
+`?ref=YOUR-OWN-ID` also works if you prefer to tag calls with your own customer or
+lead id; search for it the same way with `?phone=YOUR-OWN-ID`.
+
 ---
 
 ## Filters (query params — apply to `summary`, `calls`, `calls.csv`)
@@ -142,6 +193,7 @@ object URL from the blob, and set it as the `src` of an `<audio controls>` eleme
 | `to`      | `to=2026-09-30`        | On/before this date |
 | `source`  | `source=twilio`        | `twilio` (phone) or `browser` |
 | `booking` | `booking=true`         | Only calls that produced a booking |
+| `phone`   | `phone=9876543210`     | Only calls from this number (digits compared, prefix-insensitive) |
 | `q`       | `q=chetan`             | Free-text match on caller / language / status / source |
 | `limit`   | `limit=100`            | Max rows (`calls` only; default 500) |
 | `offset`  | `offset=100`           | Skip N rows for pagination (`calls` only) |

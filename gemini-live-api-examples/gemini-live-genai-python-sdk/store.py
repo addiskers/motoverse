@@ -111,9 +111,29 @@ def _date_of(meta):
     return s[:10]
 
 
+def normalize_phone(value):
+    """Digits only, so '+91 98765 43210', '09876543210' and '9876543210' compare equal."""
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    return digits
+
+
+def _phone_matches(wanted, caller):
+    """Suffix match on digits so country-code / trunk prefixes don't matter."""
+    have = normalize_phone(caller)
+    if not wanted or not have:
+        return False
+    short, long_ = (wanted, have) if len(wanted) <= len(have) else (have, wanted)
+    return len(short) >= 8 and long_.endswith(short)
+
+
 def _matches(meta, filters):
     src = filters.get("source")
     if src and meta.get("source") != src:
+        return False
+    phone = normalize_phone(filters.get("phone"))
+    if phone and not _phone_matches(phone, meta.get("caller")):
         return False
     booking = filters.get("booking")
     if booking is not None:

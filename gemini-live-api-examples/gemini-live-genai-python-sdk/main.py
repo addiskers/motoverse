@@ -162,15 +162,35 @@ async def root():
     return FileResponse("frontend/index.html")
 
 
+def _caller_from_param(value):
+    """Normalise an identity passed on the demo link. Phone numbers become
+    +<country><number> (bare 10-digit numbers are assumed Indian); anything
+    else (a client reference id) is stored verbatim, capped at 64 chars."""
+    if not value:
+        return None
+    value = str(value).strip()[:64]
+    stripped = "".join(ch for ch in value if ch not in "+ -()")
+    digits = store.normalize_phone(value)
+    if stripped.isdigit() and len(digits) >= 8:
+        if len(digits) == 10:
+            digits = "91" + digits
+        return "+" + digits
+    return value
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for Gemini Live."""
     await websocket.accept()
 
-    logger.info("WebSocket connection accepted")
+    # Optional identity from the demo link (?phone=... or ?ref=...) so browser
+    # calls can be looked up by number later, the same way phone calls can.
+    qp = websocket.query_params
+    caller = _caller_from_param(qp.get("phone") or qp.get("number") or qp.get("ref"))
+    logger.info(f"WebSocket connection accepted (caller={caller})")
 
     recorder = CallRecorder(model=MODEL)
-    await recorder.open(source="browser")
+    await recorder.open(source="browser", caller=caller)
     audio = AudioRecorder(enabled=RECORD_CALLS)
 
     audio_input_queue = asyncio.Queue()
@@ -1515,6 +1535,7 @@ def _filters_from_request(request: Request):
         "from": qp.get("from") or None,
         "to": qp.get("to") or None,
         "q": qp.get("q") or None,
+        "phone": qp.get("phone") or qp.get("number") or None,
         "booking": qp.get("booking"),
         "limit": qp.get("limit"),
         "offset": qp.get("offset"),
@@ -1790,6 +1811,31 @@ async def v1_analytics_calls_csv(request: Request):
         writer.writerow([pc.get(k) for k in cols])
     return Response(content=buf.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": "attachment; filename=call_analytics.csv"})
+
+
+@app.get("/api/v1/analytics/search")
+async def v1_analytics_search(request: Request):
+    """Every call for one phone number, each with full detail (transcript,
+    actions taken, recording). Cost-free like every other client endpoint."""
+    require_client_api(request)
+    qp = request.query_params
+    phone = qp.get("phone") or qp.get("number") or ""
+    if len(store.normalize_phone(phone)) < 8:
+        raise HTTPException(status_code=400,
+                            detail="Provide a phone number, e.g. ?phone=9876543210")
+    filters = _filters_from_request(request)
+    filters["phone"] = phone
+    try:
+        filters["limit"] = min(int(qp.get("limit") or 100), 200)
+    except ValueError:
+        filters["limit"] = 100
+    data = await store.list_calls(filters)
+    calls = []
+    for meta in data["items"]:
+        full = await store.load_call(meta["id"])
+        if full:
+            calls.append(public_call(full, include_detail=True))
+    return JSONResponse({"phone": phone, "total": data["total"], "calls": calls})
 
 
 @app.get("/api/v1/analytics/calls/{call_id}")

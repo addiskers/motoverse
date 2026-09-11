@@ -72,7 +72,10 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
       "source": "browser",
       "caller": "web-a1b2c3",
       "booking_created": true,
-      "has_recording": true
+      "has_recording": true,
+      "recording_url": "https://aicalling.autoverseai.in/api/v1/analytics/calls/a1b2c3/recording?exp=1789286400&sig=3f9c2b7e1a…",
+      "recording_url_expires_at": "2026-09-12T07:03:00+00:00",
+      "recording_duration_seconds": 138.4
     }
   ]
 }
@@ -98,7 +101,8 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
   "caller": "web-a1b2c3",
   "booking_created": true,
   "has_recording": true,
-  "recording_url": "/api/v1/analytics/calls/a1b2c3/recording",
+  "recording_url": "https://aicalling.autoverseai.in/api/v1/analytics/calls/a1b2c3/recording?exp=1789286400&sig=3f9c2b7e1a…",
+      "recording_url_expires_at": "2026-09-12T07:03:00+00:00",
   "recording_duration_seconds": 138.4,
   "transcript": [
     { "role": "agent", "text": "Namaste! Main Rahul bol raha hoon...", "ts": "..." },
@@ -119,19 +123,31 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
   "https://aicalling.autoverseai.in/api/v1/analytics/calls.csv?from=2026-09-01" -o calls.csv
 ```
 
-### 5. `GET /api/v1/analytics/calls/{id}/recording`
-The call's audio recording (both sides mixed) as a WAV file, `audio/wav`, mono 16 kHz.
-Only available when the call's `has_recording` is `true`; otherwise returns `404`.
-Recordings are kept for a limited retention period (currently 30 days), after which
-`has_recording` becomes `false`. Calls made before recording was enabled have no audio.
+### 5. Audio recordings
+Every call in every response (list, detail, sessions) carries a ready-to-use
+`recording_url`: an absolute, signed link to the call's audio (both sides mixed, WAV,
+mono 16 kHz). **It needs no header**, so you can use it exactly like the transcript:
+
+```html
+<audio controls src="https://aicalling.autoverseai.in/api/v1/analytics/calls/a1b2c3/recording?exp=1789286400&sig=3f9c2b7e1a…"></audio>
+```
+
+Opening the link in a browser plays it; seeking works (Range requests are supported);
+"Save as" downloads it as `call_<id>.wav`. Each link is valid for **24 hours**
+(`recording_url_expires_at` tells you when). After that, fetch the call again and you get
+a fresh link. A tampered or expired link returns `401`.
+
+If you prefer, the same path also works with your API key and no signature:
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_KEY" \
   https://aicalling.autoverseai.in/api/v1/analytics/calls/a1b2c3/recording -o call_a1b2c3.wav
 ```
 
-To play it in a browser dashboard, fetch it with the `Authorization` header, create an
-object URL from the blob, and set it as the `src` of an `<audio controls>` element.
+`recording_url` is `null` (and `has_recording` is `false`) when there is no audio: calls
+made before recording was switched on (before 11 September 2026) and calls whose audio
+has passed the 30-day retention period. Fetching the recording of such a call returns
+`404`.
 
 ### 6. `GET /api/v1/analytics/sessions/{session_id}`
 **Everything for one session in a single request.** You create a session id in your own
@@ -162,7 +178,8 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
       "caller": null,
       "booking_created": true,
       "has_recording": true,
-      "recording_url": "/api/v1/analytics/calls/a1b2c3/recording",
+      "recording_url": "https://aicalling.autoverseai.in/api/v1/analytics/calls/a1b2c3/recording?exp=1789286400&sig=3f9c2b7e1a…",
+      "recording_url_expires_at": "2026-09-12T07:03:00+00:00",
       "recording_duration_seconds": 138.4,
       "transcript": [ { "role": "agent", "text": "...", "ts": "..." }, { "role": "user", "text": "...", "ts": "..." } ],
       "tool_calls": [ { "name": "schedule_pickup", "args": { "date": "2026-09-10" }, "result": { "success": true }, "ts": "..." } ]
@@ -212,7 +229,8 @@ The page passes it through automatically; nothing is shown to the customer. Phon
 | `transcript[].role` | `user` (the customer) or `agent` (the AI assistant) |
 | `tool_calls[]` | Actions the assistant took during the call (e.g. `schedule_pickup`) |
 | `has_recording` | `true` if an audio recording is available for this call |
-| `recording_url` | Path of the recording endpoint (detail only; `null` when no recording) |
-| `recording_duration_seconds` | Length of the audio file (detail only) |
+| `recording_url` | Absolute, signed link to the audio; plays directly with no header. Valid 24 h; `null` when there is no recording |
+| `recording_url_expires_at` | When `recording_url` stops working (ISO-8601 UTC); fetch the call again for a fresh link |
+| `recording_duration_seconds` | Length of the audio file; `null` when there is no recording |
 
 > Note: This API intentionally does not expose any cost, pricing, or token-usage data.

@@ -4,9 +4,13 @@ import csv
 import io
 import json
 import logging
+import hashlib
+import hmac
 import os
 import re
 import secrets
+import time
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -46,6 +50,12 @@ ANALYTICS_API_KEY = os.getenv("ANALYTICS_API_KEY", "")
 # Call audio recording (one mono 16 kHz WAV per call under DATA_DIR/recordings).
 RECORD_CALLS = os.getenv("RECORD_CALLS", "true").strip().lower() in ("1", "true", "yes", "on")
 RECORDING_RETENTION_DAYS = float(os.getenv("RECORDING_RETENTION_DAYS", "30") or 0)
+# Signed, expiring recording links, so recording_url plays directly in a browser
+# or <audio> tag without the API key. The default secret derives from the API
+# key, so rotating the key invalidates every previously issued link.
+RECORDING_URL_TTL_SECONDS = int(os.getenv("RECORDING_URL_TTL_SECONDS", "86400") or 86400)
+RECORDING_URL_SECRET = (os.getenv("RECORDING_URL_SECRET")
+                        or hashlib.sha256(("rec:" + ANALYTICS_API_KEY).encode()).hexdigest())
 
 # ============ MOCK BACKEND DATA ============
 
@@ -1582,22 +1592,73 @@ def _sanitize_tool_calls(tool_calls):
     return out
 
 
-def public_call(call, include_detail=False):
-    """Return a cost-free view of a call (whitelist — never leaks cost/tokens/model)."""
+def _public_base(request: Request) -> str:
+    """Absolute origin for links we hand out. Prefer the origin the caller
+    actually reached us on (behind nginx: X-Forwarded-Proto + Host), since that
+    is guaranteed to work for them; fall back to PUBLIC_URL only if the request
+    carries no usable host (a stale PUBLIC_URL must never break links)."""
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host")
+            or request.url.netloc or "").split(",")[0].strip()
+    if host:
+        return f"{proto}://{host}".rstrip("/")
+    return (os.getenv("PUBLIC_URL") or "").strip().rstrip("/")
+
+
+def _sign_recording(call_id: str, exp: int) -> str:
+    msg = f"{call_id}:{exp}".encode()
+    return hmac.new(RECORDING_URL_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:32]
+
+
+def _recording_link(call_id: str, base_url: str):
+    """Absolute, signed, expiring URL for a call's audio -> (url, expires_iso)."""
+    exp = int(time.time()) + RECORDING_URL_TTL_SECONDS
+    sig = _sign_recording(call_id, exp)
+    url = f"{base_url}/api/v1/analytics/calls/{call_id}/recording?exp={exp}&sig={sig}"
+    expires = datetime.fromtimestamp(exp, tz=timezone.utc).isoformat()
+    return url, expires
+
+
+def require_client_api_or_signature(request: Request, call_id: str):
+    """Recording endpoint: accept a valid signed link OR the normal API key."""
+    if not ANALYTICS_API_KEY:
+        raise HTTPException(status_code=503, detail="Analytics API not configured")
+    sig = request.query_params.get("sig")
+    exp = request.query_params.get("exp")
+    if sig and exp:
+        try:
+            exp_i = int(exp)
+        except ValueError:
+            raise HTTPException(status_code=401, detail="Bad recording link")
+        if exp_i < int(time.time()):
+            raise HTTPException(status_code=401,
+                                detail="Recording link expired; fetch the call again for a fresh one")
+        if not secrets.compare_digest(_sign_recording(call_id, exp_i), str(sig)):
+            raise HTTPException(status_code=401, detail="Bad recording link")
+        return
+    require_client_api(request)
+
+
+def public_call(call, include_detail=False, base_url=""):
+    """Return a cost-free view of a call (whitelist — never leaks cost/tokens/model).
+    Always carries the audio fields; transcript/tool_calls only with include_detail."""
     if not call:
         return None
     out = {k: call.get(k) for k in _PUBLIC_CALL_FIELDS}
     rec = call.get("recording") or {}
     out["has_recording"] = bool(rec.get("path"))
+    if out["has_recording"]:
+        url, expires = _recording_link(call.get("id"), base_url)
+        out["recording_url"] = url
+        out["recording_url_expires_at"] = expires
+        out["recording_duration_seconds"] = rec.get("duration_seconds")
+    else:
+        out["recording_url"] = None
+        out["recording_url_expires_at"] = None
+        out["recording_duration_seconds"] = None
     if include_detail:
         out["transcript"] = _sanitize_transcript(call.get("transcript"))
         out["tool_calls"] = _sanitize_tool_calls(call.get("tool_calls"))
-        if out["has_recording"]:
-            out["recording_url"] = f"/api/v1/analytics/calls/{call.get('id')}/recording"
-            out["recording_duration_seconds"] = rec.get("duration_seconds")
-        else:
-            out["recording_url"] = None
-            out["recording_duration_seconds"] = None
     return out
 
 
@@ -1609,7 +1670,10 @@ def _recording_file_response(call):
     path = store.recording_path(call["id"])
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="Recording no longer available")
-    return FileResponse(path, media_type="audio/wav", filename=f"call_{call['id']}.wav")
+    # inline: opening the link in a browser plays it; the filename still applies
+    # when the user chooses to save it.
+    return FileResponse(path, media_type="audio/wav", filename=f"call_{call['id']}.wav",
+                        content_disposition_type="inline")
 
 
 def public_summary(s):
@@ -1786,8 +1850,9 @@ async def v1_analytics_calls(request: Request):
     if filters.get("limit") is None:
         filters["limit"] = 500
     data = await store.list_calls(filters)
+    base = _public_base(request)
     return JSONResponse({
-        "items": [public_call(c) for c in data["items"]],
+        "items": [public_call(c, base_url=base) for c in data["items"]],
         "total": data["total"],
     })
 
@@ -1828,11 +1893,12 @@ async def v1_analytics_session(session_id: str, request: Request):
     except ValueError:
         filters["limit"] = 200
     data = await store.list_calls(filters)
+    base = _public_base(request)
     calls = []
     for meta in data["items"]:
         full = await store.load_call(meta["id"])
         if full:
-            calls.append(public_call(full, include_detail=True))
+            calls.append(public_call(full, include_detail=True, base_url=base))
     return JSONResponse({"session_id": sid, "total": data["total"], "calls": calls})
 
 
@@ -1842,12 +1908,14 @@ async def v1_analytics_call_detail(call_id: str, request: Request):
     call = await store.load_call(call_id)
     if not call:
         raise HTTPException(status_code=404, detail="Call not found")
-    return JSONResponse(public_call(call, include_detail=True))
+    return JSONResponse(public_call(call, include_detail=True, base_url=_public_base(request)))
 
 
 @app.get("/api/v1/analytics/calls/{call_id}/recording")
 async def v1_analytics_call_recording(call_id: str, request: Request):
-    require_client_api(request)
+    """Streams the WAV. Accepts the signed link from recording_url (no header
+    needed) or the normal API key."""
+    require_client_api_or_signature(request, call_id)
     call = await store.load_call(call_id)
     if not call:
         raise HTTPException(status_code=404, detail="Call not found")

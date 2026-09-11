@@ -1851,10 +1851,12 @@ async def v1_analytics_calls(request: Request):
         filters["limit"] = 500
     data = await store.list_calls(filters)
     base = _public_base(request)
-    return JSONResponse({
-        "items": [public_call(c, base_url=base) for c in data["items"]],
-        "total": data["total"],
-    })
+    # Items carry the full transcript and actions, so load each returned call
+    # from disk (the in-memory index keeps only the light fields).
+    fulls = await asyncio.gather(*(store.load_call(c["id"]) for c in data["items"]))
+    items = [public_call(full or meta, include_detail=bool(full), base_url=base)
+             for meta, full in zip(data["items"], fulls)]
+    return JSONResponse({"items": items, "total": data["total"]})
 
 
 @app.get("/api/v1/analytics/calls.csv")

@@ -51,7 +51,9 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 ```
 
 ### 2. `GET /api/v1/analytics/calls`
-List calls, newest first. Supports the filters and pagination below.
+List calls, newest first. Every item is complete: transcript, actions taken, and the
+recording link are included, so one request gives you everything. Supports the filters
+and pagination below.
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_KEY" \
@@ -75,7 +77,14 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
       "has_recording": true,
       "recording_url": "https://aicalling.autoverseai.in/api/v1/analytics/calls/a1b2c3/recording?exp=1789286400&sig=3f9c2b7e1a…",
       "recording_url_expires_at": "2026-09-12T07:03:00+00:00",
-      "recording_duration_seconds": 138.4
+      "recording_duration_seconds": 138.4,
+      "transcript": [
+        { "role": "agent", "text": "Namaste! Main Rahul bol raha hoon...", "ts": "..." },
+        { "role": "user", "text": "Haan boliye", "ts": "..." }
+      ],
+      "tool_calls": [
+        { "name": "schedule_pickup", "args": { "date": "2026-09-10", "time": "10:00 AM" }, "result": { "success": true }, "ts": "..." }
+      ]
     }
   ]
 }

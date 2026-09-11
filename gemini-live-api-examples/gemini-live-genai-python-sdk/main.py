@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 
 from dotenv import load_dotenv
@@ -162,20 +163,16 @@ async def root():
     return FileResponse("frontend/index.html")
 
 
-def _caller_from_param(value):
-    """Normalise an identity passed on the demo link. Phone numbers become
-    +<country><number> (bare 10-digit numbers are assumed Indian); anything
-    else (a client reference id) is stored verbatim, capped at 64 chars."""
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_\-.:@]{1,128}$")
+
+
+def _clean_session_id(value):
+    """The client's own session id, passed on the demo link. Returns the id if
+    it is well-formed, else None."""
     if not value:
         return None
-    value = str(value).strip()[:64]
-    stripped = "".join(ch for ch in value if ch not in "+ -()")
-    digits = store.normalize_phone(value)
-    if stripped.isdigit() and len(digits) >= 8:
-        if len(digits) == 10:
-            digits = "91" + digits
-        return "+" + digits
-    return value
+    value = str(value).strip()
+    return value if _SESSION_ID_RE.match(value) else None
 
 
 @app.websocket("/ws")
@@ -183,14 +180,14 @@ async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for Gemini Live."""
     await websocket.accept()
 
-    # Optional identity from the demo link (?phone=... or ?ref=...) so browser
-    # calls can be looked up by number later, the same way phone calls can.
+    # The client tags each demo link with their own session id
+    # (?session_id=...), so every call from that link can be looked up later.
     qp = websocket.query_params
-    caller = _caller_from_param(qp.get("phone") or qp.get("number") or qp.get("ref"))
-    logger.info(f"WebSocket connection accepted (caller={caller})")
+    session_id = _clean_session_id(qp.get("session_id") or qp.get("session"))
+    logger.info(f"WebSocket connection accepted (session_id={session_id})")
 
     recorder = CallRecorder(model=MODEL)
-    await recorder.open(source="browser", caller=caller)
+    await recorder.open(source="browser", session_id=session_id)
     audio = AudioRecorder(enabled=RECORD_CALLS)
 
     audio_input_queue = asyncio.Queue()
@@ -1332,7 +1329,7 @@ tbody tr:hover{background:rgba(0,212,255,0.05);}
       <input type="date" id="fromDate" title="From date"/>
       <input type="date" id="toDate" title="To date"/>
       <select id="sourceFilter"><option value="">All sources</option><option value="twilio">Phone</option><option value="browser">Browser</option></select>
-      <input class="grow" id="search" placeholder="Search caller / language…"/>
+      <input class="grow" id="search" placeholder="Search caller / session / language…"/>
       <button class="btn ghost" id="csvBtn">Export CSV</button>
     </div>
     <div class="table-scroll">
@@ -1465,7 +1462,7 @@ async function openCall(id){
   try{
     const c=await api('/api/v1/analytics/calls/'+id).then(r=>r.json());
     let h='<h2>'+esc(c.caller||'Call')+'</h2>';
-    h+='<div style="color:var(--muted);font-size:0.75rem;margin-bottom:14px;">'+fmtDT(c.started_at)+' · '+fmtDur(c.duration_seconds)+' · '+esc(LANG[c.language]||c.language||'—')+' · '+esc(c.source||'')+'</div>';
+    h+='<div style="color:var(--muted);font-size:0.75rem;margin-bottom:14px;">'+fmtDT(c.started_at)+' · '+fmtDur(c.duration_seconds)+' · '+esc(LANG[c.language]||c.language||'—')+' · '+esc(c.source||'')+(c.session_id?' · session '+esc(c.session_id):'')+'</div>';
     h+='<div style="margin-bottom:14px;">'+(c.booking_created?'<span class="pill yes">Booking confirmed</span>':'<span class="pill no">No booking</span>')+'</div>';
     if((c.tool_calls||[]).length){
       h+='<div class="section-title" style="margin:6px 0 8px;">Actions</div>';
@@ -1535,7 +1532,7 @@ def _filters_from_request(request: Request):
         "from": qp.get("from") or None,
         "to": qp.get("to") or None,
         "q": qp.get("q") or None,
-        "phone": qp.get("phone") or qp.get("number") or None,
+        "session_id": qp.get("session_id") or None,
         "booking": qp.get("booking"),
         "limit": qp.get("limit"),
         "offset": qp.get("offset"),
@@ -1560,7 +1557,7 @@ def require_client_api(request: Request):
 
 # Whitelisted fields that are safe to expose to the client (NO cost/token data).
 _PUBLIC_CALL_FIELDS = (
-    "id", "started_at", "ended_at", "duration_seconds", "language",
+    "id", "session_id", "started_at", "ended_at", "duration_seconds", "language",
     "status", "source", "caller", "booking_created",
 )
 _PUBLIC_CALL_DETAIL_FIELDS = ("transcript", "tool_calls")
@@ -1813,29 +1810,30 @@ async def v1_analytics_calls_csv(request: Request):
                     headers={"Content-Disposition": "attachment; filename=call_analytics.csv"})
 
 
-@app.get("/api/v1/analytics/search")
-async def v1_analytics_search(request: Request):
-    """Every call for one phone number, each with full detail (transcript,
-    actions taken, recording). Cost-free like every other client endpoint."""
+@app.get("/api/v1/analytics/sessions/{session_id}")
+async def v1_analytics_session(session_id: str, request: Request):
+    """Every call made from the client's session id, newest first, each with
+    full detail (transcript, actions taken, recording). Cost-free like every
+    other client endpoint."""
     require_client_api(request)
-    qp = request.query_params
-    phone = qp.get("phone") or qp.get("number") or ""
-    if len(store.normalize_phone(phone)) < 8:
-        raise HTTPException(status_code=400,
-                            detail="Provide a phone number, e.g. ?phone=9876543210")
+    sid = _clean_session_id(session_id)
+    if not sid:
+        raise HTTPException(
+            status_code=400,
+            detail="session_id may only contain letters, digits and _ - . : @ (max 128 chars)")
     filters = _filters_from_request(request)
-    filters["phone"] = phone
+    filters["session_id"] = sid
     try:
-        filters["limit"] = min(int(qp.get("limit") or 100), 200)
+        filters["limit"] = min(int(request.query_params.get("limit") or 200), 500)
     except ValueError:
-        filters["limit"] = 100
+        filters["limit"] = 200
     data = await store.list_calls(filters)
     calls = []
     for meta in data["items"]:
         full = await store.load_call(meta["id"])
         if full:
             calls.append(public_call(full, include_detail=True))
-    return JSONResponse({"phone": phone, "total": data["total"], "calls": calls})
+    return JSONResponse({"session_id": sid, "total": data["total"], "calls": calls})
 
 
 @app.get("/api/v1/analytics/calls/{call_id}")

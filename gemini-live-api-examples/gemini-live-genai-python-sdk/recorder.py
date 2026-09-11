@@ -128,7 +128,7 @@ class CallRecorder:
 
     # ---- lifecycle ---------------------------------------------------------
 
-    async def open(self, source, call_sid=None, caller=None):
+    async def open(self, source, call_sid=None, caller=None, session_id=None):
         try:
             call_id = uuid.uuid4().hex[:16]
             if not call_sid:
@@ -139,6 +139,7 @@ class CallRecorder:
                 "call_sid": call_sid,
                 "source": source,                 # 'twilio' | 'browser'
                 "caller": caller,
+                "session_id": session_id,         # the client's own id from the demo link
                 "started_at": self._started_ts.isoformat(),
                 "ended_at": None,
                 "duration_seconds": 0,

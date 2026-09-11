@@ -133,31 +133,33 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 To play it in a browser dashboard, fetch it with the `Authorization` header, create an
 object URL from the blob, and set it as the `src` of an `<audio controls>` element.
 
-### 6. `GET /api/v1/analytics/search?phone={number}`
-**Everything for one customer in a single request.** Returns every call made with that
-phone number, newest first, and each call carries its full detail: transcript, actions
-taken, and recording. Country code and spacing don't matter: `9876543210`,
-`+919876543210`, and `+91 98765 43210` all match the same customer.
+### 6. `GET /api/v1/analytics/sessions/{session_id}`
+**Everything for one session in a single request.** You create a session id in your own
+system (for example after your user signs in) and put it on the demo link. Every call
+made from that link is tagged with it. This endpoint returns all of those calls, newest
+first, and each call carries its full detail: transcript, actions taken, and recording.
+One session can have many calls.
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_KEY" \
-  "https://aicalling.autoverseai.in/api/v1/analytics/search?phone=9876543210"
+  https://aicalling.autoverseai.in/api/v1/analytics/sessions/sess_8f2a91
 ```
 
 ```json
 {
-  "phone": "9876543210",
+  "session_id": "sess_8f2a91",
   "total": 2,
   "calls": [
     {
       "id": "a1b2c3",
+      "session_id": "sess_8f2a91",
       "started_at": "2026-09-03T06:12:44+00:00",
       "ended_at": "2026-09-03T06:15:02+00:00",
       "duration_seconds": 138,
       "language": "hi",
       "status": "completed",
       "source": "browser",
-      "caller": "+919876543210",
+      "caller": null,
       "booking_created": true,
       "has_recording": true,
       "recording_url": "/api/v1/analytics/calls/a1b2c3/recording",
@@ -169,20 +171,19 @@ curl -H "Authorization: Bearer YOUR_API_KEY" \
 }
 ```
 
-Returns `400` if `phone` is missing or shorter than 8 digits. Accepts the same `from`,
-`to`, `source`, and `booking` filters as the list endpoint, plus `limit` (default 100,
-max 200) and `offset`. An unknown number returns `200` with `"total": 0`.
+Session ids may contain letters, digits and `_ - . : @` (up to 128 characters); anything
+else returns `400`. An unknown session returns `200` with `"total": 0`. Accepts the same
+`from`, `to`, `source`, and `booking` filters as the list endpoint, plus `limit`
+(default 200, max 500) and `offset`.
 
-**Linking browser calls to a phone number.** Phone (Twilio) calls carry the caller's
-number automatically. Browser demo calls don't collect a number, so pass it on the
-link you send the customer and it is stored on the call:
+**Tagging calls with your session id.** Put it on the link you open for the customer:
 
 ```
-https://aicalling.autoverseai.in/?phone=9876543210
+https://aicalling.autoverseai.in/?session_id=sess_8f2a91
 ```
 
-`?ref=YOUR-OWN-ID` also works if you prefer to tag calls with your own customer or
-lead id; search for it the same way with `?phone=YOUR-OWN-ID`.
+The page passes it through automatically; nothing is shown to the customer. Phone
+(Twilio) calls are not tagged this way; they carry the caller's number in `caller`.
 
 ---
 
@@ -193,7 +194,7 @@ lead id; search for it the same way with `?phone=YOUR-OWN-ID`.
 | `to`      | `to=2026-09-30`        | On/before this date |
 | `source`  | `source=twilio`        | `twilio` (phone) or `browser` |
 | `booking` | `booking=true`         | Only calls that produced a booking |
-| `phone`   | `phone=9876543210`     | Only calls from this number (digits compared, prefix-insensitive) |
+| `session_id` | `session_id=sess_8f2a91` | Only calls tagged with this session id (exact match) |
 | `q`       | `q=chetan`             | Free-text match on caller / language / status / source |
 | `limit`   | `limit=100`            | Max rows (`calls` only; default 500) |
 | `offset`  | `offset=100`           | Skip N rows for pagination (`calls` only) |
@@ -207,6 +208,7 @@ lead id; search for it the same way with `?phone=YOUR-OWN-ID`.
 | `source` | `browser` (web demo) or `twilio` (phone) |
 | `booking_created` | `true` if a service pickup was booked on the call |
 | `booking_conversion_rate` | bookings ÷ total calls (0–1) |
+| `session_id` | Your session id from the demo link; `null` for calls made without one |
 | `transcript[].role` | `user` (the customer) or `agent` (the AI assistant) |
 | `tool_calls[]` | Actions the assistant took during the call (e.g. `schedule_pickup`) |
 | `has_recording` | `true` if an audio recording is available for this call |

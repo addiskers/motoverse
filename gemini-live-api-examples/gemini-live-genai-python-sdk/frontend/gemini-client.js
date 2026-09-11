@@ -13,11 +13,11 @@ class GeminiClient {
   connect() {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     let wsUrl = `${protocol}//${window.location.host}/ws`;
-    // Pass through an identity from the page link (?phone=... or ?ref=...) so
-    // this call can be found by number in analytics later.
+    // The client tags the demo link with their own session id (?session_id=...)
+    // so every call from that link can be looked up in analytics later.
     const page = new URLSearchParams(window.location.search);
-    const ident = page.get("phone") || page.get("number") || page.get("ref");
-    if (ident) wsUrl += `?phone=${encodeURIComponent(ident)}`;
+    const sessionId = page.get("session_id") || page.get("session");
+    if (sessionId) wsUrl += `?session_id=${encodeURIComponent(sessionId)}`;
 
     this.websocket = new WebSocket(wsUrl);
     this.websocket.binaryType = "arraybuffer";

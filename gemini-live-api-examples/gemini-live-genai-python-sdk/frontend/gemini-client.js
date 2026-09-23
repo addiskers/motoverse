@@ -17,7 +17,13 @@ class GeminiClient {
     // so every call from that link can be looked up in analytics later.
     const page = new URLSearchParams(window.location.search);
     const sessionId = page.get("session_id") || page.get("session");
-    if (sessionId) wsUrl += `?session_id=${encodeURIComponent(sessionId)}`;
+    // Optional ?mobile= identifies the customer in the dealership's booking
+    // system. Used only for that lookup; it is not stored as the call's caller.
+    const mobile = page.get("mobile") || page.get("phone");
+    const qs = new URLSearchParams();
+    if (sessionId) qs.set("session_id", sessionId);
+    if (mobile) qs.set("mobile", mobile);
+    if ([...qs].length) wsUrl += `?${qs.toString()}`;
 
     this.websocket = new WebSocket(wsUrl);
     this.websocket.binaryType = "arraybuffer";

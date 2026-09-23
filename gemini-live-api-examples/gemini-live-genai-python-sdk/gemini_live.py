@@ -22,7 +22,17 @@ def get_system_instruction():
 - Pickup dates are ALWAYS in the near future (within 1-2 weeks from today).
 """
 
-    return date_context + SYSTEM_INSTRUCTION
+    instruction = date_context + SYSTEM_INSTRUCTION
+    # Real-booking rules are added ONLY when the AutoServe integration is switched
+    # on. With the flag off the agent receives exactly the instructions it always
+    # has, so the existing demo is unaffected.
+    try:
+        import autoserve
+        if autoserve.enabled():
+            instruction += AUTOSERVE_INSTRUCTION
+    except Exception:
+        pass
+    return instruction
 
 
 SYSTEM_INSTRUCTION = """
@@ -102,6 +112,49 @@ CRITICAL: Keep each response SHORT (2-3 sentences max). This is a phone call —
 - Say it warmly and naturally. Do NOT mention time limits, demos, or systems. After saying it, do not start any new topic — the call will end.
 """
 
+# Appended to the system instruction ONLY when the AutoServe integration is
+# enabled. These rules replace the demo's invented booking details with the real
+# ones the booking system returns.
+AUTOSERVE_INSTRUCTION = """
+
+## REAL BOOKING SYSTEM — THESE RULES OVERRIDE ANYTHING ABOVE THAT CONFLICTS
+You are connected to the live dealership booking system. Bookings you make are real.
+
+### Booking a service — the ONLY correct order
+1. The customer agrees to book a service.
+2. Ask whether they want the vehicle PICKED UP from their address, or they will
+   bring it to the workshop. WAIT for their answer.
+3. Call get_available_slots (set pickup_requested true if they want pickup).
+4. Read out only 2 or 3 of the returned options, in the customer's language, e.g.
+   "Kal subah das baje, ya parso dopahar teen baje?" WAIT for them to choose.
+5. Call schedule_pickup with the slot_id of the option they chose, exactly as it
+   was returned. Never make up a slot_id. Never book a slot you did not offer.
+6. Only after the tool returns success, confirm the details back to them.
+
+### What you may and may not say
+- NEVER invent a booking reference, a slot, a date, a time, or a price. Say only
+  what a tool returned. If a tool did not return it, you do not know it.
+- The booking reference is the "booking_ref" the tool returns, e.g. "BK-2131".
+  Read it back clearly, digit by digit, and tell them to quote it when they call.
+- The tool returns an "arrival_window", NOT an exact appointment time. Say the
+  vehicle is expected that day within that window. Do NOT promise a clock time.
+- PICKUP: when the result contains a pickup section, say our team will call to
+  confirm the pickup time. There is NO driver assigned yet, so NEVER give a
+  driver's name or phone number, and never say a driver is on the way.
+- PICKUP CHARGE: if the result gives a pickup charge, state that amount plainly.
+  Do NOT say pickup is free unless the charge is zero.
+
+### When something goes wrong
+- If schedule_pickup returns success false, the booking did NOT happen. Never
+  tell the customer it is booked. Follow the "message" in the result: usually
+  call get_available_slots again and offer a different slot.
+- If no slots work, or the customer asks for a human, or a booking keeps failing:
+  call raise_callback with a genuine context_note describing what they need, then
+  tell them our team will call back.
+- If the customer says the vehicle is not theirs, do NOT retry the booking. Call
+  raise_callback with reason wrong_vehicle_details.
+"""
+
 TOOLS = [
     {
         "name": "get_vehicle_info",
@@ -123,13 +176,18 @@ TOOLS = [
         "parameters": {
             "type": "object",
             "properties": {
+                "slot_id": {"type": "string", "description": "The slot_id of the slot the customer chose, exactly as returned by get_available_slots. Required when slots were offered."},
+                "pickup_requested": {"type": "boolean", "description": "True if the vehicle should be collected from the customer's address."},
+                "pickup_area": {"type": "string", "description": "Customer's locality for pickup, e.g. 'baner'."},
+                "concerns": {"type": "array", "items": {"type": "string"}, "description": "Problems the customer mentioned, e.g. ['AC not cooling']."},
+                "customer_name": {"type": "string", "description": "Customer's name, if they are new and not already in the system."},
                 "vehicle_number": {"type": "string", "description": "Vehicle registration number"},
                 "date": {"type": "string", "description": "Pickup date (YYYY-MM-DD or natural language like 'tomorrow')"},
                 "time": {"type": "string", "description": "Pickup time like '9:30 AM'"},
                 "pickup_address": {"type": "string", "description": "Customer's confirmed pickup address (use address from vehicle record if confirmed, or new address if customer provides one)"},
                 "special_instructions": {"type": "string", "description": "Any special request like 'need car back by 8 PM'"}
             },
-            "required": ["vehicle_number", "date", "time", "pickup_address"]
+            "required": []
         }
     },
     {
@@ -141,6 +199,51 @@ TOOLS = [
                 "service_type": {"type": "string", "description": "e.g. 'Third Service', 'Second Service'"}
             },
             "required": ["service_type"]
+        }
+    },
+    {
+        "name": "get_available_slots",
+        "description": (
+            "Get real appointment slots the customer can actually be booked into. "
+            "Call this BEFORE schedule_pickup, after the customer agrees to a service. "
+            "Read out 2-3 of the returned options and let the customer choose one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pickup_requested": {
+                    "type": "boolean",
+                    "description": "True if the customer wants the vehicle collected from their address."
+                },
+                "area": {
+                    "type": "string",
+                    "description": "Customer's locality for pickup, e.g. 'baner'. Optional."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "raise_callback",
+        "description": (
+            "Ask a human from the dealership to call the customer back. Use when no slot "
+            "works, the customer asks for a person, or a booking cannot be completed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "One of: no_slot_available, asked_for_human, complaint, "
+                                   "wrong_vehicle_details, pricing_dispute, insurance_query, other"
+                },
+                "context_note": {
+                    "type": "string",
+                    "description": "A real handoff note for the advisor: what the customer wants and why."
+                },
+                "priority": {"type": "string", "description": "normal or high"}
+            },
+            "required": ["reason", "context_note"]
         }
     }
 ]

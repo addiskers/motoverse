@@ -10,7 +10,7 @@ import os
 import re
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from gemini_live import GeminiLive
 from twilio_handler import TwilioMediaBridge
 
+import autoserve
 import pricing
 import store
 from recorder import CallRecorder
@@ -102,6 +103,303 @@ VEHICLES = {
 
 def handle_get_vehicle_info(**kwargs):
     return VEHICLES["default"]
+
+def _mock_slots():
+    """Offered when AutoServe is off or unreachable, so the demo still flows."""
+    base = datetime.now(autoserve.IST).date()
+    out = []
+    for d in (1, 2):
+        day = base + timedelta(days=d)
+        for t in ("10:00", "15:00"):
+            out.append({"slot_id": f"mock-{day.isoformat()}-{t}",
+                        "date": day.isoformat(), "time": t,
+                        "outlet": "Autoverse Motors"})
+    return {"source": "demo", "slots": out}
+
+
+class AutoServeSession:
+    """Per-call state for the AutoServe tools.
+
+    A booking needs ids gathered earlier in the same conversation (customer,
+    vehicle, the slot the customer picked), so one of these is created per
+    WebSocket connection and closed over by that call's tool handlers.
+
+    Every method falls back to the existing mock data when AutoServe is off or
+    unreachable — the demo must keep working exactly as before.
+    """
+
+    def __init__(self, mobile=None, call_ref=None):
+        self.mobile = (mobile or autoserve.DEFAULT_MOBILE or "").strip()
+        self.call_ref = call_ref
+        self.customer_id = None
+        self.customer_name = None
+        self.vehicle_id = None
+        self.reg_no = None
+        self.area = None
+        self.preferred_outlet_id = None
+        self.service_id = None
+        self.pickup_charge = None
+        self.offered = {}          # slot_id -> slot dict last read out to the customer
+        self.booking_ref = None
+        self._idem_n = 0
+
+    def _next_idem(self, kind):
+        self._idem_n += 1
+        return autoserve.idem(self.call_ref, kind, self._idem_n)
+
+    # ---- tool: vehicle / customer context ---------------------------------
+
+    async def get_vehicle_info(self, **kwargs):
+        if not autoserve.enabled() or not self.mobile:
+            return VEHICLES["default"]
+
+        ok, data = await autoserve.lookup_customer(self.mobile)
+        if not ok:
+            # Unknown number or API trouble: keep the demo alive on mock data.
+            logger.info(f"AutoServe lookup fell back to mock ({data.get('reason')})")
+            return VEHICLES["default"]
+
+        self.customer_id = data.get("customer_id")
+        self.customer_name = data.get("name")
+        self.area = data.get("area")
+        self.preferred_outlet_id = data.get("preferred_outlet_id")
+
+        vehicles = data.get("vehicles") or []
+        v = vehicles[0] if vehicles else {}
+        self.vehicle_id = v.get("vehicle_id")
+        self.reg_no = v.get("reg_no")
+
+        info = {
+            "owner_name": data.get("name"),
+            "language": data.get("language"),
+            "do_not_call": data.get("do_not_call"),
+            "vehicle_number": v.get("reg_no"),
+            "model": " ".join(x for x in (v.get("brand"), v.get("model")) if x),
+            "current_km_system": v.get("km_reading"),
+            "last_service_date": v.get("last_service_date"),
+            "service_status": v.get("service_status"),
+            "upcoming_booking": data.get("upcoming_booking"),
+            "area": data.get("area"),
+        }
+
+        if self.reg_no:
+            ok_due, due = await autoserve.service_due(self.reg_no)
+            if ok_due:
+                info.update({
+                    "next_service_due_date": due.get("next_service_due_date"),
+                    "days_until_due": due.get("days_until_due"),
+                    "next_service_due_km": due.get("next_service_due_km"),
+                    "km_until_due": due.get("km_until_due"),
+                    "free_services_left": due.get("free_services_left"),
+                    "next_service_type": due.get("next_service_label"),
+                    "previous_concern": due.get("previous_concern"),
+                })
+        return info
+
+    # ---- tool: slots -------------------------------------------------------
+
+    async def get_available_slots(self, **kwargs):
+        if not autoserve.enabled():
+            return _mock_slots()
+
+        want_pickup = bool(kwargs.get("pickup_requested"))
+        area = (kwargs.get("area") or self.area or "").strip() or None
+
+        await self._ensure_service_id()
+
+        if want_pickup and area:
+            ok, data = await autoserve.pickup_slots(area=area)
+            if ok and data.get("serviceable"):
+                self.pickup_charge = data.get("pickup_charge")
+                return self._format_slots(data.get("slots"), pickup=True,
+                                          charge=data.get("pickup_charge"))
+            if not ok:
+                return _mock_slots()
+            # Serviceable came back false — fall through to workshop slots so the
+            # agent can offer drop-off instead of dead-ending.
+            ok2, data2 = await autoserve.slots(outlet_id=self.preferred_outlet_id,
+                                               service_id=self.service_id)
+            if not ok2:
+                return _mock_slots()
+            out = self._format_slots(data2.get("slots"))
+            out["pickup_available"] = False
+            out["note"] = "Pickup is not available for this area. Offer drop-off at the workshop."
+            return out
+
+        ok, data = await autoserve.slots(outlet_id=self.preferred_outlet_id,
+                                         service_id=self.service_id)
+        if not ok:
+            return _mock_slots()
+        return self._format_slots(data.get("slots"))
+
+    def _format_slots(self, slots, pickup=False, charge=None):
+        slots = slots or []
+        if not slots:
+            return {"slots": [], "note": "No slots available in the next two weeks. "
+                                         "Offer to have the team call back."}
+        self.offered = {}
+        out = []
+        for s in slots[:5]:
+            sid = s.get("slot_instance_id")
+            if not sid:
+                continue
+            self.offered[sid] = s
+            out.append({
+                "slot_id": sid,
+                "date": s.get("date"),
+                "time": s.get("start_time"),
+                "outlet": s.get("outlet_name"),
+            })
+        result = {"slots": out, "pickup_available": bool(pickup)}
+        if charge is not None:
+            result["pickup_charge"] = charge
+        return result
+
+    async def _ensure_service_id(self):
+        if self.service_id:
+            return
+        ok, ref = await autoserve.reference()
+        if not ok:
+            return
+        services = ref.get("services") or []
+        # Periodic Service is the default for a due-service call.
+        for s in services:
+            if (s.get("name") or "").lower().startswith("periodic"):
+                self.service_id = s.get("service_id")
+                return
+        if services:
+            self.service_id = services[0].get("service_id")
+
+    # ---- tool: booking -----------------------------------------------------
+
+    async def schedule_pickup(self, **kwargs):
+        if not autoserve.enabled():
+            return handle_schedule_pickup(**kwargs)
+
+        slot_id = kwargs.get("slot_id") or kwargs.get("slot_instance_id")
+        if not slot_id and len(self.offered) == 1:
+            slot_id = next(iter(self.offered))
+        if not slot_id:
+            return {"success": False,
+                    "error": "NO_SLOT_CHOSEN",
+                    "message": "Call get_available_slots first and let the customer pick a slot."}
+
+        await self._ensure_service_id()
+
+        payload = {
+            "idempotency_key": self._next_idem("booking"),
+            "slot_instance_id": slot_id,
+            "service_id": self.service_id,
+            "concerns": [c for c in (kwargs.get("concerns") or []) if c],
+        }
+        if self.call_ref:
+            payload["call_external_ref"] = self.call_ref
+        if self.customer_id:
+            payload["customer_id"] = self.customer_id
+        else:
+            payload["mobile"] = self.mobile
+            payload["name"] = kwargs.get("customer_name") or self.customer_name
+        if self.vehicle_id:
+            payload["vehicle_id"] = self.vehicle_id
+        elif self.reg_no:
+            payload["reg_no"] = self.reg_no
+
+        if kwargs.get("pickup_requested"):
+            payload["pickup_requested"] = True
+            if kwargs.get("pickup_address"):
+                payload["pickup_address"] = kwargs["pickup_address"]
+            area = kwargs.get("pickup_area") or self.area
+            if area:
+                payload["pickup_area"] = area
+
+        payload = {k: v for k, v in payload.items() if v not in (None, [], "")}
+
+        ok, data = await autoserve.create_booking(payload)
+        if not ok:
+            return self._booking_error(data)
+
+        self.booking_ref = data.get("ref")
+        pickup = data.get("pickup") or {}
+        window = data.get("arrival_window") or {}
+        result = {
+            "success": True,
+            "booking_ref": data.get("ref"),
+            "status": data.get("status"),
+            "date": data.get("date"),
+            # The API returns an arrival window, not a single clock time.
+            "arrival_window": f'{window.get("from")}-{window.get("to")}' if window else None,
+            "outlet": (data.get("outlet") or {}).get("name"),
+            "service": (data.get("service") or {}).get("name"),
+        }
+        if pickup.get("requested"):
+            result["pickup"] = {
+                "requested": True,
+                "charge": pickup.get("charge"),
+                "address": pickup.get("address"),
+                # arranged_by 'dealer_call' means a human will ring to arrange it —
+                # there is no driver assigned yet, so never promise one.
+                "status": "Our team will call to confirm the pickup time.",
+            }
+        return result
+
+    def _booking_error(self, err):
+        reason = err.get("reason") or "UNKNOWN"
+        guidance = {
+            "SLOT_FULL": "That slot was just taken. Call get_available_slots again and offer another.",
+            "SLOT_NOT_FOUND": "That slot is gone. Call get_available_slots again and offer another.",
+            "TOO_SOON": "Too close to now. Offer a later slot.",
+            "NO_SAME_DAY": "Same-day is not allowed. Offer tomorrow or later.",
+            "SERVICE_NOT_AT_OUTLET": "That service is not offered there. Offer a different slot.",
+            "PICKUP_NOT_AVAILABLE": "Pickup is not available. Offer drop-off at the workshop.",
+            "VEHICLE_OWNED_BY_ANOTHER": "Do NOT retry. Raise a callback for a human to check the vehicle.",
+            "NAME_REQUIRED": "Ask the customer for their name, then book again.",
+            "CUSTOMER_NOT_FOUND": "Ask for the customer's name, then book again.",
+        }.get(reason, "Booking could not be completed. Offer a callback from the team.")
+        return {"success": False, "error": reason, "message": guidance}
+
+    # ---- tool: callback ----------------------------------------------------
+
+    async def raise_callback(self, **kwargs):
+        note = (kwargs.get("context_note") or "").strip()
+        if not autoserve.enabled() or not self.customer_id:
+            return {"success": True,
+                    "message": "Our team will call you back shortly."}
+        payload = {
+            "idempotency_key": self._next_idem("callback"),
+            "customer_id": self.customer_id,
+            "reason": kwargs.get("reason") or "other",
+            "priority": kwargs.get("priority") or "normal",
+            "context_note": note or "Customer asked for assistance during an AI service call.",
+        }
+        if self.call_ref:
+            payload["call_external_ref"] = self.call_ref
+        ok, data = await autoserve.create_callback(payload)
+        if not ok:
+            return {"success": True, "message": "Our team will call you back shortly."}
+        return {"success": True, "callback_ref": data.get("ref"),
+                "message": "Our team will call you back shortly."}
+
+
+def build_tool_mapping(session=None):
+    """Tool map for one call. Without a session (or with AutoServe off) these are
+    exactly the mock handlers the demo has always used."""
+    if session is None:
+        return {
+            "get_vehicle_info": handle_get_vehicle_info,
+            "get_available_slots": lambda **kw: _mock_slots(),
+            "schedule_pickup": handle_schedule_pickup,
+            "get_service_cost_estimate": handle_get_service_cost_estimate,
+            "raise_callback": lambda **kw: {"success": True,
+                                            "message": "Our team will call you back shortly."},
+        }
+    return {
+        "get_vehicle_info": session.get_vehicle_info,
+        "get_available_slots": session.get_available_slots,
+        "schedule_pickup": session.schedule_pickup,
+        "get_service_cost_estimate": handle_get_service_cost_estimate,
+        "raise_callback": session.raise_callback,
+    }
+
 
 def handle_schedule_pickup(**kwargs):
     return {
@@ -198,6 +496,13 @@ async def websocket_endpoint(websocket: WebSocket):
 
     recorder = CallRecorder(model=MODEL)
     await recorder.open(source="browser", session_id=session_id)
+
+    # Optional ?mobile= on the demo link identifies the customer in AutoServe.
+    # Used only for the lookup — never stored as `caller` (a phone-call field).
+    autoserve_session = AutoServeSession(
+        mobile=qp.get("mobile") or qp.get("phone"),
+        call_ref=(recorder.call or {}).get("id"),
+    ) if autoserve.enabled() else None
     audio = AudioRecorder(enabled=RECORD_CALLS)
 
     audio_input_queue = asyncio.Queue()
@@ -221,11 +526,7 @@ async def websocket_endpoint(websocket: WebSocket):
         api_key=GEMINI_API_KEY,
         model=MODEL,
         input_sample_rate=16000,
-        tool_mapping={
-            "get_vehicle_info": handle_get_vehicle_info,
-            "schedule_pickup": handle_schedule_pickup,
-            "get_service_cost_estimate": handle_get_service_cost_estimate,
-        }
+        tool_mapping=build_tool_mapping(autoserve_session),
     )
 
     session_task = None
@@ -362,15 +663,15 @@ async def twilio_media_stream(websocket: WebSocket):
     await websocket.accept()
     logger.info("Twilio Media Stream WebSocket accepted")
 
+    # The caller's number arrives with the call_start event, so the session is
+    # created up front and its mobile filled in below.
+    autoserve_session = AutoServeSession() if autoserve.enabled() else None
+
     gemini_client = GeminiLive(
         api_key=GEMINI_API_KEY,
         model=MODEL,
         input_sample_rate=16000,
-        tool_mapping={
-            "get_vehicle_info": handle_get_vehicle_info,
-            "schedule_pickup": handle_schedule_pickup,
-            "get_service_cost_estimate": handle_get_service_cost_estimate,
-        }
+        tool_mapping=build_tool_mapping(autoserve_session),
     )
 
     recorder = CallRecorder(model=MODEL)
@@ -383,6 +684,11 @@ async def twilio_media_stream(websocket: WebSocket):
         if etype == "call_start":
             await recorder.open(source="twilio", call_sid=event.get("call_sid") or None,
                                 caller=event.get("caller"))
+            if autoserve_session is not None:
+                # Identify the caller in AutoServe now that we have their number.
+                autoserve_session.mobile = (event.get("caller")
+                                            or autoserve.DEFAULT_MOBILE or "").strip()
+                autoserve_session.call_ref = (recorder.call or {}).get("id")
         elif etype == "call_end":
             recording = None
             if recorder.call:

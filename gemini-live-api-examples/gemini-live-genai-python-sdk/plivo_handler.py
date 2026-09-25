@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 PLIVO_API_BASE = (os.getenv("PLIVO_API_BASE") or "https://api.plivo.com").rstrip("/")
 PLIVO_AUTH_ID = os.getenv("PLIVO_AUTH_ID", "")
 PLIVO_AUTH_TOKEN = os.getenv("PLIVO_AUTH_TOKEN", "")
-PLIVO_NUMBER = os.getenv("PLIVO_NUMBER", "")
+# Caller ID. PLIVO_FROM_NUMBER is accepted as an alias; spaces are fine ("+91 80 ...").
+PLIVO_NUMBER = os.getenv("PLIVO_NUMBER") or os.getenv("PLIVO_FROM_NUMBER", "")
 
 # Hard cap on a phone call (Plivo hangs up at this point) and when the agent is
 # told to wind up, matching the 7-minute browser demo limit.

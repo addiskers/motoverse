@@ -19,8 +19,11 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from gemini_live import GeminiLive
 from twilio_handler import TwilioMediaBridge
+from plivo_handler import PlivoMediaBridge
 
 import autoserve
+import outbound
+import plivo_handler
 import pricing
 import store
 from recorder import CallRecorder
@@ -142,6 +145,62 @@ class AutoServeSession:
         self.offered = {}          # slot_id -> slot dict last read out to the customer
         self.booking_ref = None
         self._idem_n = 0
+        self.dealership = None     # outlet the call is made on behalf of (dispatch calls)
+        self.dispatch_id = None
+        self.seed = None           # context AutoServe sent with a dispatch
+        self.started_at = datetime.now(timezone.utc)
+        self.logged_call = False   # we upserted POST /calls for this call
+
+    def seed_from_dispatch(self, payload):
+        """Use the context AutoServe sends with a dispatch, so the agent can open
+        the call knowing the customer, car and due service without an API call."""
+        c = payload.get("customer") or {}
+        v = payload.get("vehicle") or {}
+        o = payload.get("outlet") or {}
+        self.dispatch_id = payload.get("dispatch_id")
+        self.mobile = (c.get("mobile") or payload.get("phone") or self.mobile or "").strip()
+        self.customer_id = c.get("customer_id") or self.customer_id
+        self.customer_name = c.get("name") or self.customer_name
+        self.area = c.get("area") or self.area
+        self.reg_no = v.get("reg_no") or self.reg_no
+        self.preferred_outlet_id = o.get("outlet_id") or self.preferred_outlet_id
+        self.dealership = o.get("name") or None
+        self.seed = {k: val for k, val in {
+            "owner_name": c.get("name"),
+            "language": c.get("language"),
+            "vehicle_number": v.get("reg_no"),
+            "model": v.get("model"),
+            "service_status": v.get("service_status"),
+            "next_service_type": v.get("next_service_label"),
+            "next_service_due_date": v.get("next_service_due_date"),
+            "free_services_left": v.get("free_services_left"),
+            "area": c.get("area"),
+            "dealership": o.get("name"),
+            "call_reason": payload.get("reason"),
+        }.items() if val not in (None, "")}
+
+    async def _log_call(self, outcome):
+        """Upsert this call on POST /calls (dedups on external_ref) so a booking
+        that names it is attributed to the voice agent. The final report at
+        call end overwrites this with the real outcome and transcript."""
+        if not self.call_ref:
+            return
+        payload = {
+            "external_ref": self.call_ref,
+            "dispatch_id": self.dispatch_id,
+            "customer_id": self.customer_id,
+            "direction": "outgoing",
+            "started_at": self.started_at.isoformat(),
+            "duration_sec": int((datetime.now(timezone.utc) - self.started_at).total_seconds()),
+            "outcome": outcome,
+            "sentiment": "neutral",
+        }
+        payload = {k: v for k, v in payload.items() if v not in (None, "")}
+        ok, data = await autoserve.log_call(payload, force=True)
+        if not ok and data.get("reason") == "DISPATCH_NOT_FOUND":
+            payload.pop("dispatch_id", None)
+            ok, data = await autoserve.log_call(payload, force=True)
+        self.logged_call = self.logged_call or ok
 
     def _next_idem(self, kind):
         self._idem_n += 1
@@ -150,6 +209,8 @@ class AutoServeSession:
     # ---- tool: vehicle / customer context ---------------------------------
 
     async def get_vehicle_info(self, **kwargs):
+        if self.seed:
+            return dict(self.seed)
         if not autoserve.enabled() or not self.mobile:
             return VEHICLES["default"]
 
@@ -313,6 +374,10 @@ class AutoServeSession:
                 payload["pickup_area"] = area
 
         payload = {k: v for k, v in payload.items() if v not in (None, [], "")}
+
+        # AutoServe attributes a booking to the voice agent only if the call it
+        # names was logged first.
+        await self._log_call("booked")
 
         ok, data = await autoserve.create_booking(payload)
         if not ok:
@@ -629,6 +694,11 @@ async def websocket_endpoint(websocket: WebSocket):
         if recorder.call:
             recording = await audio.finalize(store.recording_path(recorder.call["id"]))
         await recorder.close(recording=recording)
+        if autoserve_session is not None and autoserve_session.logged_call:
+            # Replace the provisional "booked" record with the real outcome.
+            await outbound.log_finished_call(
+                recorder.call, customer_id=autoserve_session.customer_id,
+                recording_url=_report_recording_url(recorder.call, _outbound_base(websocket)))
         try:
             await websocket.close()
         except:
@@ -725,40 +795,228 @@ async def twilio_media_stream(websocket: WebSocket):
             pass
 
 
+def _err(status, code, message, **extra):
+    """Non-2xx JSON error. AutoServe treats any 2xx as 'accepted', so every
+    failure here must be a real error status."""
+    return JSONResponse({"accepted": False, "error": code, "message": message, **extra},
+                        status_code=status)
+
+
+def _outbound_base(conn) -> str:
+    """Public https origin for the URLs we give Plivo. Plivo must reach them from
+    the internet, so plain http is upgraded to https for any real host."""
+    proto = (conn.headers.get("x-forwarded-proto") or conn.url.scheme or "https").split(",")[0].strip()
+    proto = {"ws": "http", "wss": "https"}.get(proto, proto)
+    host = (conn.headers.get("x-forwarded-host") or conn.headers.get("host")
+            or conn.url.netloc or "").split(",")[0].strip()
+    if not host:
+        return (os.getenv("PUBLIC_URL") or "").strip().rstrip("/")
+    local = host.startswith(("localhost", "127.", "0.0.0.0", "[::1]"))
+    if proto == "http" and not local:
+        proto = "https"
+    return f"{proto}://{host}"
+
+
+def _report_recording_url(call, base_url):
+    """Signed recording link valid for the whole retention period: AutoServe keeps
+    the URL, not the audio, so the 24-hour API link would go dead on them."""
+    rec = (call or {}).get("recording") or {}
+    if not rec.get("path") or not call.get("id"):
+        return None
+    days = RECORDING_RETENTION_DAYS if RECORDING_RETENTION_DAYS > 0 else 30
+    exp = int(time.time() + days * 86400)
+    sig = _sign_recording(call["id"], exp)
+    return f"{base_url}/api/v1/analytics/calls/{call['id']}/recording?exp={exp}&sig={sig}"
+
+
 @app.post("/call-me")
 async def call_me(request: Request):
-    """Make Twilio call a phone number and connect to the AI agent."""
-    from twilio.rest import Client
+    """AutoServe dispatch: dial a customer through Plivo and connect the agent.
 
-    body = await request.json()
-    to_number = body.get("phone")
-    if not to_number:
-        return {"error": "Missing 'phone' field. Send {\"phone\": \"+91XXXXXXXXXX\"}"}
+    Answers within seconds. 202 means Plivo accepted the call; the outcome is
+    reported later on AutoServe's POST /api/v1/calls with the dispatch_id.
+    Every failure is a non-2xx status.
+    """
+    raw = await request.body()
 
-    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
-        return {"error": "Twilio credentials not configured"}
-
-    # Use PUBLIC_URL env var or Render URL — Twilio can't reach localhost
-    public_url = os.getenv("PUBLIC_URL", "")
-    if public_url:
-        webhook_url = f"{public_url}/twilio/voice"
+    mode = outbound.auth_mode()
+    if mode is None:
+        return _err(503, "NOT_CONFIGURED", "Outbound calling is not configured on this server.")
+    if mode == "signature" and request.headers.get("x-autoserve-signature"):
+        ok, why = outbound.verify_autoserve_signature(request.headers, raw)
     else:
-        host = request.headers.get("host", "localhost")
-        protocol = "https" if "onrender.com" in host else request.url.scheme
-        webhook_url = f"{protocol}://{host}/twilio/voice"
+        ok = outbound.verify_api_key(request.headers)
+        why = "missing or invalid signature" if mode == "signature" else "missing or invalid API key"
+    if not ok:
+        logger.warning(f"/call-me rejected: {why}")
+        return _err(401, "UNAUTHORIZED", why)
 
     try:
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        call = client.calls.create(
-            to=to_number,
-            from_=TWILIO_PHONE_NUMBER,
-            url=webhook_url,
-        )
-        logger.info(f"Outbound call initiated: {call.sid} to {to_number}")
-        return {"success": True, "call_sid": call.sid, "to": to_number}
+        payload = json.loads(raw or b"{}")
+        if not isinstance(payload, dict):
+            raise ValueError("body is not a JSON object")
+    except Exception:
+        return _err(400, "INVALID_JSON", "Request body must be a JSON object.")
+
+    phone = str(payload.get("phone") or "").strip()
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if not phone:
+        return _err(400, "MISSING_PHONE", "Missing 'phone' (the number to dial, e.g. +919820012345).")
+    if len(digits) < 10 or len(digits) > 15 or digits.strip("0") == "" or digits.endswith("0000000000"):
+        return _err(400, "INVALID_PHONE", f"'{phone}' is not a dialable phone number.")
+
+    dispatch_id = payload.get("dispatch_id")
+    prev = outbound.existing(dispatch_id)
+    if prev:
+        # A retry of a dispatch we already dialled: never ring the customer twice.
+        return JSONResponse({"accepted": True, "duplicate": True, "dispatch_id": dispatch_id,
+                             "request_uuid": prev.get("request_uuid"), "status": prev.get("status")},
+                            status_code=200)
+
+    if not plivo_handler.configured():
+        return _err(503, "TELEPHONY_NOT_CONFIGURED", "Plivo credentials are not configured.")
+
+    rec = outbound.new_dispatch(payload, _outbound_base(request))
+    links = outbound.urls(rec)
+    status, data = await plivo_handler.place_call(phone, links["answer"], links["hangup"])
+
+    if status == "ok":
+        rec["request_uuid"] = data.get("request_uuid")
+        rec["status"] = "ringing"
+        outbound.start_watchdog(rec["key"])
+        logger.info(f"Dispatch {dispatch_id}: dialling {phone} (request {rec['request_uuid']})")
+        return JSONResponse({"accepted": True, "dispatch_id": dispatch_id,
+                             "request_uuid": rec["request_uuid"]}, status_code=202)
+
+    # Never dialled: forget it so AutoServe can safely retry the same dispatch_id.
+    outbound.forget(rec["key"])
+    if status == "rejected":
+        return _err(502, "DIAL_REJECTED", "The phone provider refused the call.",
+                    detail=data.get("detail"), provider_status=data.get("http"))
+    if status == "timeout":
+        return _err(504, "DIAL_TIMEOUT", "The phone provider did not respond in time.")
+    return _err(502, "DIAL_FAILED", "Could not reach the phone provider.", detail=data.get("detail"))
+
+
+# ============ PLIVO VOICE ENDPOINTS ============
+
+@app.api_route("/plivo/answer/{key}/{sig}", methods=["GET", "POST"])
+async def plivo_answer(key: str, sig: str, request: Request):
+    """Plivo fetches this when the customer picks up: stream the call to us."""
+    if not outbound.check_url_sig(key, sig):
+        logger.warning("Plivo answer with bad or expired token; hanging up")
+        return Response(content=plivo_handler.hangup_xml(), media_type="application/xml")
+    rec = outbound.get(key)
+    rec["status"] = "answered"
+    return Response(content=plivo_handler.answer_xml(outbound.urls(rec)["stream"]),
+                    media_type="application/xml")
+
+
+@app.api_route("/plivo/hangup/{key}/{sig}", methods=["GET", "POST"])
+async def plivo_hangup(key: str, sig: str, request: Request):
+    """Plivo reports the end of every call here, answered or not. A call that never
+    connected is reported to AutoServe now; a connected one is reported by its
+    media stream when the conversation ends."""
+    if not outbound.check_url_sig(key, sig):
+        return Response(status_code=403)
+    form = {}
+    if request.method == "POST":
+        try:
+            form = dict(await request.form())
+        except Exception:
+            form = {}
+    form = form or dict(request.query_params)
+    rec = outbound.get(key)
+    status = (form.get("CallStatus") or "").lower()
+    rec["hangup"] = {"status": status, "cause": form.get("HangupCause"),
+                     "duration": form.get("Duration") or form.get("BillDuration")}
+    logger.info(f"Plivo hangup for dispatch {rec.get('dispatch_id')}: {status} ({form.get('HangupCause')})")
+    if not rec.get("connected"):
+        detail = form.get("HangupCause") or status or None
+        asyncio.create_task(outbound.report(
+            key, outbound.outcome_for_telephony(status), detail=detail,
+            telephony_duration=rec["hangup"]["duration"]))
+    return Response(status_code=204)
+
+
+@app.websocket("/plivo/media-stream/{key}/{sig}")
+async def plivo_media_stream(websocket: WebSocket, key: str, sig: str):
+    """Plivo's bidirectional audio stream for one dispatched call."""
+    if not outbound.check_url_sig(key, sig):
+        await websocket.close(code=4401)
+        logger.warning("Rejected Plivo media stream: bad or expired token")
+        return
+    await websocket.accept()
+    rec = outbound.get(key)
+    rec["connected"] = True
+    rec["status"] = "in_progress"
+    base = rec.get("base_url") or _outbound_base(websocket)
+
+    session = AutoServeSession(mobile=rec.get("phone"))
+    session.seed_from_dispatch(rec)
+
+    gemini_client = GeminiLive(
+        api_key=GEMINI_API_KEY,
+        model=MODEL,
+        input_sample_rate=16000,
+        tool_mapping=build_tool_mapping(session),
+    )
+    recorder = CallRecorder(model=MODEL)
+    audio = AudioRecorder(enabled=RECORD_CALLS)
+
+    async def broadcast_event(event):
+        etype = event.get("type")
+        if etype == "call_start":
+            await recorder.open(source="plivo",
+                                call_sid=event.get("call_sid") or rec.get("request_uuid"),
+                                caller=rec.get("phone"))
+            session.call_ref = (recorder.call or {}).get("id")
+            session.started_at = datetime.now(timezone.utc)
+            rec["call_id"] = session.call_ref
+        elif etype == "call_end":
+            recording = None
+            if recorder.call:
+                recording = await audio.finalize(store.recording_path(recorder.call["id"]))
+            await recorder.close(recording=recording)
+        else:
+            await recorder.on_event(event)
+
+        dead = set()
+        for watcher in live_watchers:
+            try:
+                await watcher.send_json(event)
+            except Exception:
+                dead.add(watcher)
+        live_watchers.difference_update(dead)
+
+    bridge = PlivoMediaBridge(
+        websocket=websocket,
+        gemini_client=gemini_client,
+        text_trigger="Hi, I have picked up the phone. Please start the call.",
+        on_event=broadcast_event,
+        audio_recorder=audio,
+    )
+    try:
+        await bridge.run()
     except Exception as e:
-        logger.error(f"Failed to initiate call: {e}")
-        return {"error": str(e)}
+        import traceback
+        logger.error(f"Plivo bridge error: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+    finally:
+        call = recorder.call or {}
+        spoke = any(m.get("role") == "user" for m in (call.get("transcript") or []))
+        if bridge.started and bridge.gemini_error and not spoke and not call.get("booking_created"):
+            outcome, detail = "failed", "the voice agent could not start"
+        elif bridge.started:
+            outcome = outbound.outcome_for_call(call, wrapped_up=bridge.wrapped_up)
+            detail = None
+        else:
+            outcome, detail = "failed", "audio stream never started"
+        await outbound.report(key, outcome, call=call, detail=detail,
+                              recording_url=_report_recording_url(call, base))
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # ============ LIVE TRANSCRIPT DASHBOARD ============

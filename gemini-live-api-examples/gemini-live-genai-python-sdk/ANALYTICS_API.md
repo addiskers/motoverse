@@ -218,7 +218,7 @@ The page passes it through automatically; nothing is shown to the customer. Phon
 |-----------|------------------------|-------------|
 | `from`    | `from=2026-09-01`      | On/after this date (YYYY-MM-DD) |
 | `to`      | `to=2026-09-30`        | On/before this date |
-| `source`  | `source=twilio`        | `twilio` (phone) or `browser` |
+| `source`  | `source=plivo`         | `plivo` (phone call), `browser` (web demo), or `twilio` (older phone calls) |
 | `booking` | `booking=true`         | Only calls that produced a booking |
 | `session_id` | `session_id=sess_8f2a91` | Only calls tagged with this session id (exact match) |
 | `q`       | `q=chetan`             | Free-text match on caller / language / status / source |
@@ -231,7 +231,7 @@ The page passes it through automatically; nothing is shown to the customer. Phon
 | `duration_seconds` | Call length in seconds |
 | `language` | Detected from the customer's speech: `hi` Hindi, `gu` Gujarati, `en` English, `mr` Marathi, `te` Telugu, `kn` Kannada, `ta` Tamil, `ml` Malayalam, `bn` Bengali, `pa` Punjabi, `or` Odia. `unknown` = customer spoke but the script wasn't recognised. `no_speech` = the customer never spoke (usually a blocked microphone or an immediate hang-up). |
 | `status` | `completed`, `abandoned`, `in_progress` |
-| `source` | `browser` (web demo) or `twilio` (phone) |
+| `source` | `plivo` (phone call), `browser` (web demo), or `twilio` (older phone calls) |
 | `booking_created` | `true` if a service pickup was booked on the call |
 | `booking_conversion_rate` | bookings ÷ total calls (0–1) |
 | `session_id` | Your session id from the demo link; `null` for calls made without one |

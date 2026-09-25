@@ -52,6 +52,13 @@ def enabled():
     return bool(_FLAG and API_KEY)
 
 
+def configured():
+    """An API key is present. Dispatch reporting only needs this: AutoServe must
+    hear the outcome of calls it asked for, whether or not the agent's booking
+    tools are switched on."""
+    return bool(API_KEY)
+
+
 def today_ist():
     return datetime.now(IST).date()
 
@@ -97,8 +104,8 @@ def _unwrap(resp):
     }
 
 
-async def _request(method, path, *, params=None, json=None):
-    if not enabled():
+async def _request(method, path, *, params=None, json=None, force=False):
+    if not (enabled() or (force and configured())):
         return False, {"reason": "DISABLED", "message": "AutoServe is not enabled"}
     if time.time() < _breaker["until"]:
         return False, {"code": "INTERNAL", "reason": "UNREACHABLE",
@@ -126,8 +133,8 @@ async def _get(path, params=None):
     return await _request("GET", path, params=params)
 
 
-async def _post(path, payload):
-    return await _request("POST", path, json=payload)
+async def _post(path, payload, force=False):
+    return await _request("POST", path, json=payload, force=force)
 
 
 def idem(call_ref, kind, n=1):
@@ -224,7 +231,8 @@ async def create_callback(payload):
     return await _post("/callbacks", payload)
 
 
-async def log_call(payload):
+async def log_call(payload, force=False):
     """POST /calls — dedups on external_ref, so a repeat updates in place.
-    Note: this endpoint rejects idempotency_key."""
-    return await _post("/calls", payload)
+    Note: this endpoint rejects idempotency_key, and rejects the whole record
+    if dispatch_id is unknown (DISPATCH_NOT_FOUND)."""
+    return await _post("/calls", payload, force=force)

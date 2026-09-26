@@ -103,13 +103,32 @@ def verify_autoserve_signature(headers, raw_body: bytes):
     if abs(time.time() - ts) > SIGNATURE_TOLERANCE:
         return False, "timestamp outside tolerance"
 
-    mac = hmac.new(WEBHOOK_SECRET.encode(), ts_raw.encode() + b"." + raw_body, hashlib.sha256)
-    expected_hex = mac.hexdigest()
-    expected_b64 = base64.b64encode(mac.digest()).decode()
-    for c in candidates:
-        if hmac.compare_digest(c.lower(), expected_hex) or hmac.compare_digest(c, expected_b64):
-            return True, "ok"
+    signed = ts_raw.encode() + b"." + raw_body
+    for label, key in _secret_keys():
+        mac = hmac.new(key, signed, hashlib.sha256)
+        expected_hex = mac.hexdigest()
+        expected_b64 = base64.b64encode(mac.digest()).decode()
+        for c in candidates:
+            if hmac.compare_digest(c.lower(), expected_hex) or hmac.compare_digest(c, expected_b64):
+                if label != "full":
+                    logger.info(f"AutoServe signature matched using the {label} secret form")
+                return True, "ok"
     return False, "signature mismatch"
+
+
+def _secret_keys():
+    """The HMAC key forms a 'whsec_…' secret is commonly used as: the full string,
+    the part after the prefix, and that part hex-decoded. All derive from the same
+    secret, so accepting each costs no security."""
+    keys = [("full", WEBHOOK_SECRET.encode())]
+    if WEBHOOK_SECRET.startswith("whsec_"):
+        rest = WEBHOOK_SECRET[len("whsec_"):]
+        keys.append(("unprefixed", rest.encode()))
+        try:
+            keys.append(("hex-decoded", bytes.fromhex(rest)))
+        except ValueError:
+            pass
+    return keys
 
 
 def verify_api_key(headers):

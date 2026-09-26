@@ -300,18 +300,42 @@ class AutoServeSession:
                                          "Offer to have the team call back."}
         self.offered = {}
         out = []
-        for s in slots[:5]:
-            sid = s.get("slot_instance_id")
-            if not sid:
-                continue
-            self.offered[sid] = s
-            out.append({
-                "slot_id": sid,
-                "date": s.get("date"),
-                "time": s.get("start_time"),
-                "outlet": s.get("outlet_name"),
-            })
-        result = {"slots": out, "pickup_available": bool(pickup)}
+        if pickup:
+            # Pickup is booked for the whole day at the customer's address; the
+            # dealership then rings to arrange the time. So offer DAYS, one option
+            # per date, with no time at all (the slot's hour is irrelevant).
+            seen = set()
+            for s in slots:
+                sid, day = s.get("slot_instance_id"), s.get("date")
+                if not sid or not day or day in seen:
+                    continue
+                seen.add(day)
+                self.offered[sid] = s
+                try:
+                    label = datetime.fromisoformat(day).strftime("%A, %d %B")
+                except ValueError:
+                    label = day
+                out.append({"slot_id": sid, "date": day, "day": label,
+                            "outlet": s.get("outlet_name")})
+                if len(out) == 5:
+                    break
+            result = {"slots": out, "pickup_available": True,
+                      "note": "Pickup is booked for the day. Offer these DAYS only and never "
+                              "mention a time. After booking, tell the customer our team will "
+                              "call them to arrange the pickup."}
+        else:
+            for s in slots[:5]:
+                sid = s.get("slot_instance_id")
+                if not sid:
+                    continue
+                self.offered[sid] = s
+                out.append({
+                    "slot_id": sid,
+                    "date": s.get("date"),
+                    "time": s.get("start_time"),
+                    "outlet": s.get("outlet_name"),
+                })
+            result = {"slots": out, "pickup_available": False}
         if charge is not None:
             result["pickup_charge"] = charge
         return result
@@ -391,20 +415,22 @@ class AutoServeSession:
             "booking_ref": data.get("ref"),
             "status": data.get("status"),
             "date": data.get("date"),
-            # The API returns an arrival window, not a single clock time.
-            "arrival_window": f'{window.get("from")}-{window.get("to")}' if window else None,
             "outlet": (data.get("outlet") or {}).get("name"),
             "service": (data.get("service") or {}).get("name"),
         }
         if pickup.get("requested"):
+            # Booked for the day; the dealership rings to arrange the time. No time
+            # and no arrival window are passed on, so the agent has none to promise,
+            # and there is no driver to name.
             result["pickup"] = {
                 "requested": True,
                 "charge": pickup.get("charge"),
                 "address": pickup.get("address"),
-                # arranged_by 'dealer_call' means a human will ring to arrange it —
-                # there is no driver assigned yet, so never promise one.
-                "status": "Our team will call to confirm the pickup time.",
+                "what_to_say": "Our team will call you to arrange the pickup.",
             }
+        elif window:
+            # Workshop drop-off: the API gives an arrival window, not a clock time.
+            result["arrival_window"] = f'{window.get("from")}-{window.get("to")}'
         return result
 
     def _booking_error(self, err):

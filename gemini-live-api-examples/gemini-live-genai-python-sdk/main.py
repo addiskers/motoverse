@@ -471,6 +471,33 @@ class AutoServeSession:
                 "message": "Our team will call you back shortly."}
 
 
+def schedule_callback_result(**kwargs):
+    """The customer wants to be called again later. Works out the exact time
+    (never in the past, inside calling hours) so the agent confirms the real one;
+    the outcome report then carries it as callback_at."""
+    at = outbound.compute_callback_at(kwargs.get("callback_in_minutes"),
+                                      kwargs.get("callback_at_local"))
+    return {
+        "success": True,
+        "callback_at": at.isoformat(),
+        "callback_at_local": at.strftime("%A %d %B, %H:%M"),
+        "say": "Confirm this day and time with the customer in their language, "
+               "thank them, and end the call politely.",
+    }
+
+
+def mark_do_not_call_result(**kwargs):
+    return {"success": True,
+            "say": "Apologise briefly, confirm they will not be called again, and end the call."}
+
+
+def no_price_result(**kwargs):
+    """Real calls never quote invented prices: AutoServe owns pricing."""
+    return {"available": False,
+            "message": "No price is available here. Tell the customer the service advisor "
+                       "will share the exact estimate. Do NOT give any number or range."}
+
+
 def build_tool_mapping(session=None):
     """Tool map for one call. Without a session (or with AutoServe off) these are
     exactly the mock handlers the demo has always used."""
@@ -482,13 +509,19 @@ def build_tool_mapping(session=None):
             "get_service_cost_estimate": handle_get_service_cost_estimate,
             "raise_callback": lambda **kw: {"success": True,
                                             "message": "Our team will call you back shortly."},
+            "schedule_callback": schedule_callback_result,
+            "mark_do_not_call": mark_do_not_call_result,
         }
     return {
         "get_vehicle_info": session.get_vehicle_info,
         "get_available_slots": session.get_available_slots,
         "schedule_pickup": session.schedule_pickup,
-        "get_service_cost_estimate": handle_get_service_cost_estimate,
+        # Real (AutoServe) calls: no invented prices. Demo keeps its mock table.
+        "get_service_cost_estimate": (no_price_result if (autoserve.enabled() or session.seed)
+                                      else handle_get_service_cost_estimate),
         "raise_callback": session.raise_callback,
+        "schedule_callback": schedule_callback_result,
+        "mark_do_not_call": mark_do_not_call_result,
     }
 
 
@@ -1033,11 +1066,12 @@ async def plivo_media_stream(websocket: WebSocket, key: str, sig: str):
         if bridge.started and bridge.gemini_error and not spoke and not call.get("booking_created"):
             outcome, detail = "failed", "the voice agent could not start"
         elif bridge.started:
-            outcome = outbound.outcome_for_call(call, wrapped_up=bridge.wrapped_up)
-            detail = None
+            # None: work it out from the conversation (tools, then transcript check).
+            outcome, detail = None, None
         else:
             outcome, detail = "failed", "audio stream never started"
         await outbound.report(key, outcome, call=call, detail=detail,
+                              wrapped_up=bridge.wrapped_up,
                               recording_url=_report_recording_url(call, base))
         try:
             await websocket.close()

@@ -161,6 +161,28 @@ You are connected to the live dealership booking system. Bookings you make are r
 - If the customer says the vehicle is not theirs, do NOT retry the booking. Call
   raise_callback with reason wrong_vehicle_details.
 
+### Customer wants a call later, or no more calls — ALWAYS use a tool
+- If the customer asks to be called later ("1-2 ghante baad call kijiye", "kal
+  call karna", "shaam ko call karo", "abhi busy hoon", "call me later"), call
+  schedule_callback BEFORE you reply:
+  - a relative time -> callback_in_minutes, using the LATER end of a range
+    ("1-2 ghante" = 120, "aadhe ghante baad" = 30);
+  - a named day or clock time -> callback_at_local "YYYY-MM-DD HH:MM" (India time,
+    worked out from today's date above), e.g. "kal subah 10 baje";
+  - no time given -> call it with no time (defaults to 2 hours).
+  Then confirm the day and time the tool RETURNS (it may adjust it to calling
+  hours), thank them, and end the call. Saying "I'll call you later" without the
+  tool is a failure: the customer would never be called back.
+- If the customer asks NOT to be called again ("dobara call mat karna", "don't
+  call me", "number hata do"), call mark_do_not_call, apologise briefly, confirm
+  they won't be called, and end the call. Do not try to persuade them.
+- A customer who is simply not interested right now is NOT do-not-call.
+
+### Prices
+- NEVER give a price or a price range. If asked about cost, say the service
+  advisor will share the exact estimate. get_service_cost_estimate will confirm
+  that no price is available.
+
 ### Calling on behalf of a dealership
 - If get_vehicle_info returns a "dealership" field, you are calling on behalf of
   THAT dealership. Use its name everywhere you would say the company name,
@@ -239,6 +261,40 @@ TOOLS = [
                     "type": "string",
                     "description": "Customer's locality for pickup, e.g. 'baner'. Optional."
                 }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "schedule_callback",
+        "description": (
+            "The customer asked to be called again later. Records exactly when, so they "
+            "are called back at that time. Call this BEFORE telling the customer you will "
+            "call later, then confirm the time it returns."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "callback_in_minutes": {
+                    "type": "integer",
+                    "description": "For a relative time. Use the later end of a range: '1-2 hours' = 120."
+                },
+                "callback_at_local": {
+                    "type": "string",
+                    "description": "For a named day or clock time, India time, 'YYYY-MM-DD HH:MM'."
+                },
+                "note": {"type": "string", "description": "What the customer said, briefly."}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "mark_do_not_call",
+        "description": "The customer asked not to be called or contacted again. Call it, apologise, and end the call.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "note": {"type": "string", "description": "What the customer said, briefly."}
             },
             "required": []
         }

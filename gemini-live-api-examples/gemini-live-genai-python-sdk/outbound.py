@@ -22,9 +22,10 @@ import logging
 import os
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import autoserve
+import outcome_check
 
 logger = logging.getLogger(__name__)
 
@@ -221,21 +222,142 @@ def outcome_for_telephony(status):
     return "no_answer" if (status or "").lower() in _NO_ANSWER_STATUSES else "failed"
 
 
+# ---- callback timing -------------------------------------------------------
+
+# Customers are only called back inside this window (India time).
+CALL_WINDOW_START = int(os.getenv("CALLBACK_WINDOW_START_HOUR", "9") or 9)
+CALL_WINDOW_END = int(os.getenv("CALLBACK_WINDOW_END_HOUR", "19") or 19)
+_DEFAULT_CALLBACK_MINUTES = 120
+_MIN_LEAD = timedelta(minutes=10)
+_MAX_AHEAD = timedelta(days=14)
+
+# AutoServe's callback reasons; anything else is reported as "other".
+CALLBACK_REASONS = {"no_slot_available", "asked_for_human", "complaint", "call_dropped",
+                    "wrong_vehicle_details", "pricing_dispute", "insurance_query",
+                    "language_mismatch", "other"}
+
+
+def _fit_window(t, now):
+    """Keep a callback at least 10 min ahead, within 14 days, inside calling hours:
+    before the window -> 10:00 that day, after it -> 10:00 the next day."""
+    t = max(t, now + _MIN_LEAD)
+    t = min(t, now + _MAX_AHEAD)
+    if t.hour < CALL_WINDOW_START:
+        t = t.replace(hour=10, minute=0)
+    elif t.hour > CALL_WINDOW_END or (t.hour == CALL_WINDOW_END and t.minute > 0):
+        t = (t + timedelta(days=1)).replace(hour=10, minute=0)
+    return t.replace(second=0, microsecond=0)
+
+
+def compute_callback_at(minutes=None, local=None, now=None):
+    """When to call the customer back, as an India-time datetime.
+    `local` ("YYYY-MM-DD HH:MM", India time) wins over `minutes`; with neither,
+    the default is two hours."""
+    now = (now or datetime.now(autoserve.IST)).astimezone(autoserve.IST)
+    target = None
+    if local:
+        try:
+            target = datetime.strptime(str(local).strip()[:16], "%Y-%m-%d %H:%M").replace(tzinfo=autoserve.IST)
+        except ValueError:
+            target = None
+    if target is None:
+        try:
+            m = int(float(minutes)) if minutes not in (None, "") else _DEFAULT_CALLBACK_MINUTES
+        except (TypeError, ValueError):
+            m = _DEFAULT_CALLBACK_MINUTES
+        target = now + timedelta(minutes=max(m, 0))
+    return _fit_window(target, now)
+
+
+def _future_callback_at(value):
+    """AutoServe rejects a callback_at in the past, so re-fit it at send time."""
+    if not value:
+        return None
+    try:
+        t = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    now = datetime.now(autoserve.IST)
+    return _fit_window(t.astimezone(autoserve.IST), now).isoformat()
+
+
+def _reason(value):
+    value = (value or "").strip().lower()
+    return value if value in CALLBACK_REASONS else "other"
+
+
+# ---- outcome ----------------------------------------------------------------
+
 def outcome_for_call(call, wrapped_up=False):
     """Map a finished conversation to AutoServe's outcome vocabulary."""
     call = call or {}
     if call.get("booking_created"):
         return "booked"
     tools = [t.get("name") for t in (call.get("tool_calls") or [])]
-    if "raise_callback" in tools or wrapped_up:
+    if "mark_do_not_call" in tools:
+        return "do_not_call"
+    if "schedule_callback" in tools or "raise_callback" in tools or wrapped_up:
         return "callback"
     if any(m.get("role") == "user" for m in (call.get("transcript") or [])):
         return "not_interested"
     return "no_answer"
 
 
-def _summary(outcome, call, detail=None):
+def callback_details(call, wrapped_up=False):
+    """(callback_at, handoff_reason) for a callback outcome.
+    schedule_callback: the customer wants the AI to ring again at a time, so
+    AutoServe re-queues them. raise_callback / wrap-up: handed to the dealer's
+    team, so there is no AI re-call time."""
+    tool_calls = (call or {}).get("tool_calls") or []
+    for t in reversed(tool_calls):
+        if t.get("name") == "schedule_callback":
+            r = t.get("result") if isinstance(t.get("result"), dict) else {}
+            return r.get("callback_at"), _reason((t.get("args") or {}).get("reason"))
+    for t in reversed(tool_calls):
+        if t.get("name") == "raise_callback":
+            return None, _reason((t.get("args") or {}).get("reason"))
+    if wrapped_up:
+        return None, "other"
+    return None, None
+
+
+async def resolve_outcome(call, wrapped_up=False):
+    """Rule-based outcome, plus the transcript safety net when the rules would
+    say 'not_interested'. Returns (outcome, callback_at, handoff_reason, reviewed)."""
+    outcome = outcome_for_call(call, wrapped_up)
+    callback_at, handoff_reason = callback_details(call, wrapped_up) if outcome == "callback" else (None, None)
+    if outcome != "not_interested":
+        return outcome, callback_at, handoff_reason, False
+    now = datetime.now(autoserve.IST)
+    verdict = await outcome_check.classify((call or {}).get("transcript"), now.strftime("%Y-%m-%d %H:%M"))
+    intent = (verdict or {}).get("intent")
+    if intent == "call_back_later":
+        at = compute_callback_at(verdict.get("callback_in_minutes"), verdict.get("callback_at_local"), now)
+        return "callback", at.isoformat(), "other", True
+    if intent == "stop_calling":
+        return "do_not_call", None, None, True
+    if intent == "asked_for_human":
+        return "callback", None, "asked_for_human", True
+    return outcome, None, None, False
+
+
+def _summary(outcome, call, detail=None, callback_at=None, handoff_reason=None, reviewed=False):
+    text = _summary_text(outcome, call, detail, callback_at, handoff_reason)
+    return f"{text} (from transcript review)" if reviewed else text
+
+
+def _summary_text(outcome, call, detail=None, callback_at=None, handoff_reason=None):
     call = call or {}
+    if outcome == "do_not_call":
+        return "Customer asked not to be called again."
+    if outcome == "callback" and callback_at:
+        try:
+            when = datetime.fromisoformat(callback_at).astimezone(autoserve.IST).strftime("%d %b %H:%M IST")
+        except ValueError:
+            when = callback_at
+        return f"Customer asked to be called back at {when}. No booking made."
+    if outcome == "callback" and handoff_reason == "asked_for_human":
+        return "Customer asked to speak to a person. No booking made."
     if outcome == "booked":
         for t in reversed(call.get("tool_calls") or []):
             r = t.get("result") or {}
@@ -269,7 +391,9 @@ def _transcript(call):
 
 
 def _call_payload(call, *, outcome, external_ref, started_at, duration,
-                  dispatch_id=None, customer_id=None, recording_url=None, detail=None):
+                  dispatch_id=None, customer_id=None, recording_url=None, detail=None,
+                  callback_at=None, handoff_reason=None, reviewed=False):
+    callback_at = _future_callback_at(callback_at) if outcome == "callback" else None
     payload = {
         "external_ref": external_ref,
         "dispatch_id": dispatch_id,
@@ -279,7 +403,9 @@ def _call_payload(call, *, outcome, external_ref, started_at, duration,
         "duration_sec": int(float(duration or 0)),
         "outcome": outcome,
         "sentiment": "neutral",
-        "summary": _summary(outcome, call, detail),
+        "summary": _summary(outcome, call, detail, callback_at, handoff_reason, reviewed),
+        "callback_at": callback_at,
+        "handoff_reason": handoff_reason if outcome == "callback" else None,
         "recording_url": recording_url,
         "transcript": _transcript(call) or None,
     }
@@ -301,6 +427,13 @@ async def _send(payload, label):
             # Retried at once: this is a data problem, not a transient one.
             payload = {k: v for k, v in payload.items() if k != "dispatch_id"}
             continue
+        if (data.get("code") == "VALIDATION"
+                and ("callback_at" in payload or "handoff_reason" in payload)):
+            # Never hold AutoServe's call slot over the callback fields: report
+            # the outcome without them rather than not at all.
+            logger.warning(f"{label}: callback fields rejected ({data.get('message')}); resending without them")
+            payload = {k: v for k, v in payload.items() if k not in ("callback_at", "handoff_reason")}
+            continue
         if reason not in ("UNREACHABLE", "INTERNAL", "BAD_RESPONSE", "UNKNOWN"):
             logger.warning(f"{label}: report rejected ({reason}): {data.get('message')}")
             return False
@@ -310,16 +443,25 @@ async def _send(payload, label):
         await asyncio.sleep(backoff.pop(0))
 
 
-async def report(key, outcome, *, call=None, recording_url=None, detail=None,
-                 telephony_duration=None):
+async def report(key, outcome=None, *, call=None, recording_url=None, detail=None,
+                 telephony_duration=None, wrapped_up=False):
     """Report a dispatched call's outcome on POST /api/v1/calls, exactly once.
-    Never raises."""
+    With `outcome=None` the outcome is worked out from the conversation (tools
+    first, then the transcript safety net). Never raises."""
     rec = _registry.get(key)
     if not rec or rec["reported"]:
         return
     rec["reported"] = True
-    rec["status"] = f"reported:{outcome}"
     call = call or {}
+    callback_at = handoff_reason = None
+    reviewed = False
+    if outcome is None:
+        try:
+            outcome, callback_at, handoff_reason, reviewed = await resolve_outcome(call, wrapped_up)
+        except Exception as e:
+            logger.warning(f"Outcome resolution error: {e}")
+            outcome = outcome_for_call(call, wrapped_up)
+    rec["status"] = f"reported:{outcome}"
     duration = call.get("duration_seconds")
     if duration is None:
         duration = telephony_duration
@@ -331,6 +473,7 @@ async def report(key, outcome, *, call=None, recording_url=None, detail=None,
         duration=duration,
         dispatch_id=rec.get("dispatch_id"),
         customer_id=(rec.get("customer") or {}).get("customer_id"),
+        callback_at=callback_at, handoff_reason=handoff_reason, reviewed=reviewed,
     )
     try:
         await _send(payload, f"Dispatch {rec.get('dispatch_id')}")
@@ -344,10 +487,16 @@ async def log_finished_call(call, *, customer_id=None, recording_url=None, wrapp
     call = call or {}
     if not call.get("id"):
         return
+    try:
+        outcome, callback_at, handoff_reason, reviewed = await resolve_outcome(call, wrapped_up)
+    except Exception as e:
+        logger.warning(f"Outcome resolution error: {e}")
+        outcome, callback_at, handoff_reason, reviewed = outcome_for_call(call, wrapped_up), None, None, False
     payload = _call_payload(
-        call, outcome=outcome_for_call(call, wrapped_up), recording_url=recording_url,
+        call, outcome=outcome, recording_url=recording_url,
         external_ref=call["id"], started_at=call.get("started_at"),
         duration=call.get("duration_seconds"), customer_id=customer_id,
+        callback_at=callback_at, handoff_reason=handoff_reason, reviewed=reviewed,
     )
     try:
         await _send(payload, f"Call {call['id']}")

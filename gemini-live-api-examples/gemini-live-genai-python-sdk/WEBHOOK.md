@@ -119,16 +119,25 @@ it we end it immediately, so only your retry reaches the agent.
 For every accepted dispatch we call your `POST /api/v1/calls` exactly once with
 `dispatch_id`, `external_ref` (our call id, also used as `call_external_ref` on
 bookings), `customer_id`, `direction: "outgoing"`, `started_at`, `duration_sec`,
-`outcome`, a one-line `summary`, the `transcript` (`agent` / `customer`) and a
+`outcome`, a one-line `summary`, `callback_at` and `handoff_reason` (see below), the
+`transcript` (`agent` / `customer`) and a
 `recording_url` (WAV, no header needed, valid 30 days).
 
 | `outcome` | When |
 |---|---|
 | `booked` | A booking was confirmed during the call |
-| `callback` | The agent raised a callback, including at the 7-minute limit |
-| `not_interested` | The customer spoke with the agent but did not book |
+| `callback` | Asked to be called later (`callback_at` says when), or handed to your team (`handoff_reason` says why), including at the 7-minute limit |
+| `do_not_call` | The customer asked not to be called again |
+| `not_interested` | Spoke with the agent and did not want to book, without asking for a later call |
 | `no_answer` | Not picked up, busy, or picked up without the customer speaking |
 | `failed` | Could not be completed, or no signal from the phone network within 12 minutes |
+
+With `callback`:
+- `callback_at` is set when the customer wants to be rung again: ISO-8601 India time,
+  e.g. `2026-09-26T18:15:00+05:30`, always in the future and inside calling hours
+  (09:00–19:00). Re-queue the customer for this time.
+- `handoff_reason` is `other` when they simply asked to be called later; otherwise one
+  of your callback reasons, e.g. `asked_for_human`, `complaint`, `wrong_vehicle_details`.
 
 If your API answers `DISPATCH_NOT_FOUND`, we resend without `dispatch_id` so the call is
 still on record. Transient errors are retried for about a minute and a half.
